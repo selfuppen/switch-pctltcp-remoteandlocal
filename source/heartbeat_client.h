@@ -14,9 +14,6 @@
 #define TUNNEL_DEFAULT_INTERVAL_SEC  3    // 心跳间隔（秒），长轮询模式下只需短间隔
 #define TUNNEL_DEFAULT_RECV_TIMEOUT_SEC     25  // 接收超时需 >= 服务器长轮询时间(20s) + 余量
 
-// 本地服务器配置（可选，未配置时不启动本地心跳线程）
-#define TUNNEL_LOCAL_DEFAULT_PORT    8000
-
 // 服务器类型（用于区分远程和本地服务器）
 typedef enum {
     TUNNEL_SERVER_REMOTE = 0,

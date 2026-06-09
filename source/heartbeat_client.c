@@ -1,21 +1,13 @@
 // heartbeat_client.c — Switch 远程+本地双服务器心跳客户端实现
-// v1.8.0: 支持同时连接远程服务器和本地服务器（双通道）
+// v2.0.0: 支持同时连接远程服务器和本地服务器（双通道）
 //
-// 核心修改：
-//   1. 添加本地服务器配置（local_host, local_port, local_psk）
-//   2. 创建两个心跳线程：远程线程 + 本地线程
-//   3. 两个服务器的命令都解析后推入同一个命令队列
-//   4. 配置热重载支持双服务器
-//
-// 历史版本：
-//   v1.7.1: 修复 EALREADY(114)、息屏唤醒延迟、息屏崩溃
-//   v1.7.1 核心修改：
-//     1. http_connect(): inet_addr() 代替 getaddrinfo()（lwIP 更稳定）
-//     2. http_connect(): 纯阻塞 connect，不用 SO_SNDTIMEO（避免 EALREADY）
-//     3. http_post_json(): 每次心跳后关闭 socket（Connection: close 协议要求）
-//     4. tunnel_restart(): 不停止线程，只设 s_wake_flag + 关闭 socket 强制重连
-//     5. tunnel_stop(): 先关 socket 再等线程，避免死锁
-//     6. 日志：仅异常时打，正常心跳静默
+// 核心设计：
+//   1. Switch 作为客户端主动连接（无 accept() 问题）
+//   2. 两个独立心跳线程：远程线程 + 本地线程
+//   3. 各自独立重连、退避、恢复，互不影响
+//   4. 两个服务器的命令都解析后推入同一个命令队列
+//   5. 任意一个服务器连不上不影响另一个
+//   6. 两个都连不上也只是功能不可用，不会崩溃
 
 #include "heartbeat_client.h"
 
@@ -35,9 +27,9 @@
 extern void log_msg(const char *msg);
 
 /* ------------------------------------------------------------------ */
-/*  版本号（v1.8.0: 支持远程+本地双服务器）                                                             */
+/*  版本号                                                             */
 /* ------------------------------------------------------------------ */
-#define TUNNEL_VERSION  "1.8.0"
+#define TUNNEL_VERSION  "2.0.0"
 
 /* ------------------------------------------------------------------ */
 /*  前向声明                                                           */
@@ -73,7 +65,7 @@ static void load_config(void) {
 
     FILE *f = fopen(TUNNEL_CONFIG_PATH, "r");
     if (!f) {
-        return;  /* 静默失败，tunnel_start 会检查 s_cfg_loaded */
+        return;
     }
 
     char buf[2048];
@@ -112,7 +104,7 @@ static void load_config(void) {
     if (val) json_read_int(val, &s_cfg_recv_timeout);
     if (s_cfg_recv_timeout < 22) s_cfg_recv_timeout = TUNNEL_DEFAULT_RECV_TIMEOUT_SEC;
 
-    /* 读取本地服务器配置（可选）*/
+    /* 读取本地服务器配置（可选 — 没有则不启动本地线程） */
     s_cfg_local_enabled = false;
     val = json_find_value(buf, "local_host");
     if (val && json_read_string(val, s_cfg_local_host, sizeof(s_cfg_local_host))) {
@@ -126,6 +118,10 @@ static void load_config(void) {
                 log_msg(log_buf);
             }
         }
+    }
+
+    if (!s_cfg_local_enabled) {
+        log_msg("tunnel: local server not configured, remote-only mode");
     }
 
     s_cfg_loaded = true;
@@ -152,7 +148,6 @@ static bool cmd_queue_push(const TunnelCommand *cmd) {
     int next = (s_cmd_tail + 1) % TUNNEL_CMD_QUEUE_SIZE;
     if (next == s_cmd_head) {
         s_cmd_head = (s_cmd_head + 1) % TUNNEL_CMD_QUEUE_SIZE;
-        /* 队列满，静默丢弃最旧的，不打日志 */
     }
 
     s_cmd_queue[s_cmd_tail] = *cmd;
@@ -299,7 +294,7 @@ static void parse_heartbeat_response(const char *response) {
             json_read_int_array(weekly_val, cmd.weekly, 7);
         }
     } else {
-        return;  /* 未知命令，静默忽略 */
+        return;
     }
 
     cmd_queue_push(&cmd);
@@ -307,11 +302,9 @@ static void parse_heartbeat_response(const char *response) {
 
 /* ------------------------------------------------------------------ */
 /*  HTTP/1.1 客户端（raw socket，无外部依赖）                        */
-/*  v1.7.1: inet_addr + 纯阻塞 connect + SO_REUSEADDR              */
 /* ------------------------------------------------------------------ */
 
 static int http_connect(const char *host, int port, int recv_timeout) {
-    /* 使用 inet_addr() 代替 getaddrinfo()，lwIP 上更稳定 */
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -326,14 +319,11 @@ static int http_connect(const char *host, int port, int recv_timeout) {
         return -1;
     }
 
-    /* SO_REUSEADDR: 允许复用处于 TIME_WAIT 的本地地址，避免 EALREADY */
     int optval = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
 
-    /* 阻塞式 connect，不使用 SO_SNDTIMEO（lwIP 上会导致非阻塞行为和 EALREADY）*/
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         int err = errno;
-        /* EALREADY(114)/ETIMEDOUT(110)/EINPROGRESS(115) 属于正常的重试场景，不打日志 */
         if (err != 110 && err != 115 && err != 114) {
             char buf[128];
             snprintf(buf, sizeof(buf), "tunnel: connect failed (errno=%d)", err);
@@ -343,7 +333,6 @@ static int http_connect(const char *host, int port, int recv_timeout) {
         return -1;
     }
 
-    /* 设置接收超时（长轮询需要 25+ 秒） */
     struct timeval tv;
     tv.tv_sec = recv_timeout;
     tv.tv_usec = 0;
@@ -352,11 +341,6 @@ static int http_connect(const char *host, int port, int recv_timeout) {
     return fd;
 }
 
-/** 发送 HTTP POST 并读取响应体（只取 JSON 部分）
- *  每次调用创建新连接，响应后关闭 socket（Connection: close 协议要求）。
- *  这样避免了 EALREADY 问题，因为每次心跳之间有 backoff 间隔，
- *  lwIP 有足够时间清理旧 TCP PCB。
- */
 static bool http_post_json(const char *host, int port, int recv_timeout,
                            const char *path, const char *auth_token,
                            const char *body, char *resp_buf, size_t resp_size) {
@@ -379,7 +363,6 @@ static bool http_post_json(const char *host, int port, int recv_timeout,
         "\r\n",
         full_path, host, port, auth_token, body_len);
 
-    /* 发送请求 */
     ssize_t sent = send(fd, req_header, strlen(req_header), 0);
     if (sent < 0) {
         close(fd);
@@ -392,14 +375,13 @@ static bool http_post_json(const char *host, int port, int recv_timeout,
         return false;
     }
 
-    /* 读取响应 */
     ssize_t total = 0;
     while (total < (ssize_t)(resp_size - 1)) {
         ssize_t n = recv(fd, resp_buf + total, resp_size - 1 - total, 0);
         if (n <= 0) break;
         total += n;
     }
-    close(fd);  /* Connection: close — 每次心跳后关闭 socket */
+    close(fd);
 
     if (total == 0) {
         return false;
@@ -407,7 +389,6 @@ static bool http_post_json(const char *host, int port, int recv_timeout,
 
     resp_buf[total] = '\0';
 
-    /* 找到 JSON 正文（跳过 HTTP 头部） */
     char *json_start = strstr(resp_buf, "\r\n\r\n");
     if (!json_start) {
         return false;
@@ -421,49 +402,62 @@ static bool http_post_json(const char *host, int port, int recv_timeout,
 }
 
 /* ------------------------------------------------------------------ */
-/*  心跳线程（远程 + 本地）                                           */
+/*  心跳线程（远程 + 本地，各自独立）                                     */
 /* ------------------------------------------------------------------ */
-static Thread s_thread_remote;  /* 远程服务器线程 */
-static Thread s_thread_local;   /* 本地服务器线程（可选）*/
+static Thread s_thread_remote;
+static Thread s_thread_local;
 static volatile bool s_running_remote = false;
 static volatile bool s_running_local = false;
-static volatile bool s_wake_flag = false;
+static volatile bool s_wake_flag_remote = false;   /* 远程线程专用唤醒标志 */
+static volatile bool s_wake_flag_local = false;    /* 本地线程专用唤醒标志 */
 static volatile bool s_thread_remote_active = false;
 static volatile bool s_thread_local_active = false;
-static time_t s_start_time = 0;
 
-/* 退避参数 — 正常间隔 3 秒（长轮询模式下等待由服务器端处理）
- * 失败时指数退避，最大 300 秒 */
+/* 退避参数 */
 #define BACKOFF_BASE_SEC    3
 #define BACKOFF_MAX_SEC     300
 
 /**
  * 通用心跳线程函数
  * @param arg: TunnelServerType (TUNNEL_SERVER_REMOTE or TUNNEL_SERVER_LOCAL)
+ *
+ * 关键设计：
+ *   - 每个线程有独立的 wake flag，不会被另一个线程消费
+ *   - 失败时指数退避，不会疯狂重连
+ *   - 配置丢失时线程退出，由 tunnel_restart() 重新创建
+ *   - 无论连接成功还是失败，都不会崩溃
  */
 static void heartbeat_thread_func(void *arg) {
     TunnelServerType server_type = (TunnelServerType)(uintptr_t)arg;
-    
-    /* 根据服务器类型选择配置 */
+
+    /* 根据服务器类型选择配置和状态 */
     const char *host;
     int port;
     const char *psk;
     const char *server_name;
-    
+    volatile bool *running_flag;
+    volatile bool *wake_flag;
+    volatile bool *active_flag;
+
     if (server_type == TUNNEL_SERVER_LOCAL) {
         host = s_cfg_local_host;
         port = s_cfg_local_port;
         psk = s_cfg_local_psk;
         server_name = "local";
-        s_running_local = true;
+        running_flag = &s_running_local;
+        wake_flag = &s_wake_flag_local;
+        active_flag = &s_thread_local_active;
     } else {
         host = s_cfg_host;
         port = s_cfg_port;
         psk = s_cfg_psk;
         server_name = "remote";
-        s_running_remote = true;
+        running_flag = &s_running_remote;
+        wake_flag = &s_wake_flag_remote;
+        active_flag = &s_thread_remote_active;
     }
-    
+
+    *running_flag = true;
     time_t start_time = time(NULL);
     char resp_buf[2048];
     char body_buf[1024];
@@ -471,8 +465,14 @@ static void heartbeat_thread_func(void *arg) {
     int backoff = BACKOFF_BASE_SEC;
     int fail_streak = 0;
 
-    while ((server_type == TUNNEL_SERVER_LOCAL && s_running_local) ||
-           (server_type == TUNNEL_SERVER_REMOTE && s_running_remote)) {
+    while (*running_flag) {
+        /* 检查唤醒标志 */
+        if (*wake_flag) {
+            *wake_flag = false;
+            backoff = BACKOFF_BASE_SEC;
+            /* 唤醒后立即重试，不等 */
+        }
+
         /* 构建心跳 JSON 体 */
         TunnelStatus cur;
         tunnel_get_status(&cur);
@@ -530,21 +530,20 @@ static void heartbeat_thread_func(void *arg) {
         } else {
             fail_streak++;
             /* 只有连续失败 3 次以上才打日志，避免刷屏 */
-            if (fail_streak >= 3) {
+            if (fail_streak == 3 || (fail_streak % 10 == 0)) {
                 char buf[128];
-                snprintf(buf, sizeof(buf), "tunnel: %s heartbeat failed, retry in %ds", server_name, backoff);
+                snprintf(buf, sizeof(buf), "tunnel: %s heartbeat failed (%d times), retry in %ds",
+                         server_name, fail_streak, backoff);
                 log_msg(buf);
             }
         }
 
         /* 休眠，支持 wake 唤醒（分段等待，每次1秒检查一次） */
-        int sleep_secs = (server_type == TUNNEL_SERVER_LOCAL) ? backoff / 2 : backoff;  /* 本地服务器重试更快 */
-        for (int i = 0; i < sleep_secs && 
-             ((server_type == TUNNEL_SERVER_LOCAL && s_running_local) ||
-              (server_type == TUNNEL_SERVER_REMOTE && s_running_remote)); i++) {
-            if (s_wake_flag) {
-                s_wake_flag = false;
-                backoff = BACKOFF_BASE_SEC;  /* 唤醒后立即重置退避，不等 */
+        int sleep_secs = ok ? backoff : backoff;
+        for (int i = 0; i < sleep_secs && *running_flag; i++) {
+            if (*wake_flag) {
+                *wake_flag = false;
+                backoff = BACKOFF_BASE_SEC;
                 break;
             }
             svcSleepThread(1000000000ULL);
@@ -555,11 +554,15 @@ static void heartbeat_thread_func(void *arg) {
             backoff = backoff * 2;
             if (backoff > BACKOFF_MAX_SEC) backoff = BACKOFF_MAX_SEC;
 
-            /* 重连前重新加载配置文件（支持热重载）*/
+            /* 每 3 次失败重新加载配置文件（支持热重载）*/
             if (fail_streak % 3 == 0) {
                 load_config();
                 if (!s_cfg_loaded) {
-                    break;  /* 配置丢失，退出线程 */
+                    /* 配置丢失 → 线程退出，由 tunnel_restart() 重建 */
+                    char buf[128];
+                    snprintf(buf, sizeof(buf), "tunnel: %s config lost, thread exiting", server_name);
+                    log_msg(buf);
+                    break;
                 }
                 /* 重新读取服务器配置（可能已更改）*/
                 if (server_type == TUNNEL_SERVER_LOCAL) {
@@ -575,11 +578,11 @@ static void heartbeat_thread_func(void *arg) {
         }
     }
 
-    if (server_type == TUNNEL_SERVER_LOCAL) {
-        s_thread_local_active = false;
-    } else {
-        s_thread_remote_active = false;
-    }
+    *active_flag = false;
+
+    char buf[64];
+    snprintf(buf, sizeof(buf), "tunnel: %s thread exited", server_name);
+    log_msg(buf);
 }
 
 /* ------------------------------------------------------------------ */
@@ -595,6 +598,7 @@ void tunnel_init(void) {
 void tunnel_start(void) {
     load_config();
     if (!s_cfg_loaded) {
+        log_msg("tunnel: config not loaded, cannot start");
         return;
     }
 
@@ -604,14 +608,16 @@ void tunnel_start(void) {
 
     /* 启动远程服务器心跳线程 */
     s_running_remote = true;
-    Result rc = threadCreate(&s_thread_remote, heartbeat_thread_func, 
+    Result rc = threadCreate(&s_thread_remote, heartbeat_thread_func,
                              (void*)TUNNEL_SERVER_REMOTE, NULL, 0x10000, 0x2C, -2);
     if (R_FAILED(rc)) {
         s_running_remote = false;
+        log_msg("tunnel: failed to create remote thread");
     } else {
         rc = threadStart(&s_thread_remote);
         if (R_FAILED(rc)) {
             s_running_remote = false;
+            log_msg("tunnel: failed to start remote thread");
         } else {
             s_thread_remote_active = true;
             log_msg("tunnel: remote server thread started");
@@ -625,10 +631,12 @@ void tunnel_start(void) {
                           (void*)TUNNEL_SERVER_LOCAL, NULL, 0x10000, 0x2C, -2);
         if (R_FAILED(rc)) {
             s_running_local = false;
+            log_msg("tunnel: failed to create local thread (non-fatal)");
         } else {
             rc = threadStart(&s_thread_local);
             if (R_FAILED(rc)) {
                 s_running_local = false;
+                log_msg("tunnel: failed to start local thread (non-fatal)");
             } else {
                 s_thread_local_active = true;
                 log_msg("tunnel: local server thread started");
@@ -641,12 +649,11 @@ void tunnel_stop(void) {
     /* 停止远程线程 */
     if (s_running_remote) {
         s_running_remote = false;
-        s_wake_flag = true;
-        
-        /* 非阻塞等待：最多等 3 秒让线程自然退出 */
+        s_wake_flag_remote = true;
+
         if (s_thread_remote_active) {
             for (int i = 0; i < 30 && s_thread_remote_active; i++) {
-                svcSleepThread(100000000ULL);  /* 100ms */
+                svcSleepThread(100000000ULL);
             }
         }
         threadClose(&s_thread_remote);
@@ -656,53 +663,8 @@ void tunnel_stop(void) {
     /* 停止本地线程 */
     if (s_running_local) {
         s_running_local = false;
-        s_wake_flag = true;
-        
-        if (s_thread_local_active) {
-            for (int i = 0; i < 30 && s_thread_local_active; i++) {
-                svcSleepThread(100000000ULL);  /* 100ms */
-            }
-        }
-        threadClose(&s_thread_local);
-        s_thread_local_active = false;
-    }
-}
+        s_wake_flag_local = true;
 
-void tunnel_restart(void) {
-    /* 热重载配置（不停止线程，唤醒后立即生效）*/
-    s_wake_flag = true;
-    load_config();  /* 重新加载配置 */
-    
-    /* 如果远程线程未运行，启动它 */
-    if (!s_running_remote && s_cfg_loaded) {
-        s_running_remote = true;
-        Result rc = threadCreate(&s_thread_remote, heartbeat_thread_func,
-                                 (void*)TUNNEL_SERVER_REMOTE, NULL, 0x10000, 0x2C, -2);
-        if (R_SUCCEEDED(rc)) {
-            rc = threadStart(&s_thread_remote);
-            if (R_SUCCEEDED(rc)) {
-                s_thread_remote_active = true;
-            }
-        }
-    }
-    
-    /* 如果配置了本地服务器且本地线程未运行，启动它 */
-    if (s_cfg_local_enabled && !s_running_local) {
-        s_running_local = true;
-        Result rc = threadCreate(&s_thread_local, heartbeat_thread_func,
-                                 (void*)TUNNEL_SERVER_LOCAL, NULL, 0x10000, 0x2C, -2);
-        if (R_SUCCEEDED(rc)) {
-            rc = threadStart(&s_thread_local);
-            if (R_SUCCEEDED(rc)) {
-                s_thread_local_active = true;
-            }
-        }
-    }
-    
-    /* 如果本地服务器被禁用且本地线程正在运行，停止它 */
-    if (!s_cfg_local_enabled && s_running_local) {
-        s_running_local = false;
-        s_wake_flag = true;
         if (s_thread_local_active) {
             for (int i = 0; i < 30 && s_thread_local_active; i++) {
                 svcSleepThread(100000000ULL);
@@ -713,8 +675,59 @@ void tunnel_restart(void) {
     }
 }
 
+void tunnel_restart(void) {
+    /* 热重载配置 */
+    load_config();
+
+    /* 唤醒两个线程 */
+    s_wake_flag_remote = true;
+    s_wake_flag_local = true;
+
+    /* 如果远程线程已退出（配置丢失等），重新创建 */
+    if (!s_thread_remote_active && s_cfg_loaded) {
+        s_running_remote = true;
+        Result rc = threadCreate(&s_thread_remote, heartbeat_thread_func,
+                                 (void*)TUNNEL_SERVER_REMOTE, NULL, 0x10000, 0x2C, -2);
+        if (R_SUCCEEDED(rc)) {
+            rc = threadStart(&s_thread_remote);
+            if (R_SUCCEEDED(rc)) {
+                s_thread_remote_active = true;
+                log_msg("tunnel: remote thread recreated");
+            }
+        }
+    }
+
+    /* 如果本地线程已退出但配置了本地服务器，重新创建 */
+    if (!s_thread_local_active && s_cfg_local_enabled) {
+        s_running_local = true;
+        Result rc = threadCreate(&s_thread_local, heartbeat_thread_func,
+                                 (void*)TUNNEL_SERVER_LOCAL, NULL, 0x10000, 0x2C, -2);
+        if (R_SUCCEEDED(rc)) {
+            rc = threadStart(&s_thread_local);
+            if (R_SUCCEEDED(rc)) {
+                s_thread_local_active = true;
+                log_msg("tunnel: local thread recreated");
+            }
+        }
+    }
+
+    /* 如果本地服务器被禁用且本地线程正在运行，停止它 */
+    if (!s_cfg_local_enabled && s_running_local) {
+        s_running_local = false;
+        s_wake_flag_local = true;
+        if (s_thread_local_active) {
+            for (int i = 0; i < 30 && s_thread_local_active; i++) {
+                svcSleepThread(100000000ULL);
+            }
+        }
+        threadClose(&s_thread_local);
+        s_thread_local_active = false;
+        log_msg("tunnel: local thread stopped (disabled in config)");
+    }
+}
+
 bool tunnel_is_running(void) {
-    return s_running_remote || s_running_local;
+    return s_thread_remote_active || s_thread_local_active;
 }
 
 int tunnel_dequeue_cmd(TunnelCommand *cmd) {
@@ -738,5 +751,6 @@ int tunnel_dequeue_cmd(TunnelCommand *cmd) {
 }
 
 void tunnel_notify_wake(void) {
-    s_wake_flag = true;
+    s_wake_flag_remote = true;
+    s_wake_flag_local = true;
 }
