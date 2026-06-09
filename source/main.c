@@ -269,6 +269,13 @@ static void execute_tunnel_cmd(TunnelCommand *cmd) {
              cmd->type, cmd->param, cmd->day_of_week,
              R_SUCCEEDED(rc) ? "OK" : "FAIL", (unsigned)rc);
     log_msg(msg);
+
+    /* 命令执行后：等1秒让pctl生效，更新状态，强制立即心跳上报 */
+    if (R_SUCCEEDED(rc)) {
+        svcSleepThread(1000000000ULL);   /* 1 second */
+        update_tunnel_status();
+        tunnel_force_heartbeat();
+    }
 }
 
 /* ---- Network init ---- */
