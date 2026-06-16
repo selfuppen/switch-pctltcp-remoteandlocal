@@ -2,6 +2,23 @@
 
 Nintendo Switch 家长控制 sysmodule，**同时支持远程服务器 + 本地局域网服务器双通道控制**。
 
+---
+
+## 🎯 项目系列演进故事
+
+本项目历经 **6 次迭代**，逐步从本机工具演进为完善的双通道远程管理方案：
+
+| 版本 | 仓库 | 日期 | 核心改进 |
+|------|------|------|----------|
+| V1 | [switch-parental-timer](https://github.com/gmaitxqqq/switch-parental-timer) | 05-25 | 本机 NRO 工具，直接操作家长控制 |
+| V2 | [switch-pctltcp-nro](https://github.com/gmaitxqqq/switch-pctltcp-nro) | 05-26 | 增加 TCP 服务器，PC 客户端远程管理 |
+| V3 | [switch-pctltcp-web](https://github.com/gmaitxqqq/switch-pctltcp-web) | 05-27 | TCP 改为 HTTP，手机浏览器直接管理 |
+| V4 | [switch-pctltcp-sysmodule](https://github.com/gmaitxqqq/switch-pctltcp-sysmodule) | 05-27 | 转为后台 sysmodule，开机自启 |
+| V5 | [switch-pctltcp-remote](https://github.com/gmaitxqqq/switch-pctltcp-remote) | 05-31 | 增加远程隧道，支持外出管理 |
+| **V6（最终版）** | **[switch-pctltcp-remoteandlocal](https://github.com/gmaitxqqq/switch-pctltcp-remoteandlocal)** | **06-09** | **双通道：远程 + 本地局域网** |
+
+➡️ **各版本详细对比见文末「系列工具对比」章节。**
+
 ## 功能特点
 
 | 通道 | 方式 | 使用场景 | 优势 |
@@ -245,17 +262,40 @@ curl -X POST https://你的域名/admin/command \
 ├── toolbox.json               # Hekate 工具箱声明
 ## 版本历史
 
-- **v1.8.2** — **彻底修复** HTTP 服务"假死"问题（每 10 秒误重启一次）。根因：`main.c` 中的健康检查逻辑（判断线程是否卡住）存在根本性缺陷——无论使用 loop count 还是时间戳，都会误判，导致 HTTP 服务被无谓重启，长期运行后 8081 端口无法访问。修复：彻底删除 `main.c` 中的"线程卡住"健康检查，`accept()` 失败后的 socket 重建完全由 `http_server.c` 内部的 `accept_fail_count` 逻辑处理，与远程隧道模块保持一致的设计思路。
-- **v1.8.0** — **彻底修复**休眠唤醒后局域网 8081 端口无法访问的问题。根因：`accept()` 失败后不重建 socket，lwIP 内部状态损坏后永远无法恢复。修复：借鉴远程隧道"每次都是新 socket"的思路，在 `accept()` 连续失败时主动关闭并重建 listening socket，彻底解决长期运行后 8081 不通的问题。
+- **v2.0.0** — 双通道支持（远程 + 本地局域网）、修复 WiFi 就绪后 LAN 8081 端口绑定问题
+- **v1.8.2** — 彻底修复 HTTP 服务"假死"问题（每 10 秒误重启一次）
+- **v1.8.1** — 修复休眠唤醒后 8081 端口无法访问（借鉴远程隧道思路，accept 失败时主动重建 socket）
+- **v1.8.0** — 合并 remote 架构改进：去掉 pthread_join()（修复 2168-0002），增加 client socket 超时，线程永久运行
 - **v1.7.2** — 修复 WiFi 就绪后 LAN 8081 端口绑定问题（在首次获取 IP 后重新绑定）
 - **v1.7.1** — 修复罕见情况下心跳线程崩溃的问题，提升稳定性
 - **v1.7.0** — 优化 Web UI 响应式布局，支持移动端访问；新增命令执行日志
-
 - **v1.6.0** — 长轮询（秒级命令响应）、负数减少时间、UTC+8 时区、unsigned 溢出修复
 - **v1.5.0** — 远程心跳隧道、配置文件化（不再硬编码）、WAF 友好 HTTP/1.1、热重载
 - **v1.4.1** — 修复 sleep/wake 检测
 - **v1.4** — 健康检查 + 网络恢复
 - **v1.3** — 初始版本，局域网 HTTP 控制
+
+
+---
+
+## 📊 系列工具对比
+
+| 版本 | 仓库 | 类型 | 适用场景 | 核心特点 |
+|------|------|------|----------|----------|
+| V1 | [switch-parental-timer](https://github.com/gmaitxqqq/switch-parental-timer) | 本机 NRO | 在 Switch 上直接操作，无需网络 | PIN 验证、纯前台应用 |
+| V2 | [switch-pctltcp-nro](https://github.com/gmaitxqqq/switch-pctltcp-nro) | 前台 NRO + TCP | 固定 IP 局域网，PC 客户端远程管理 | TCP 文本协议、PC Tkinter 客户端 |
+| V3 | [switch-pctltcp-web](https://github.com/gmaitxqqq/switch-pctltcp-web) | 前台 NRO + Web UI | 外出时手机浏览器管理（无固定 IP） | HTTP 服务器、手机友好 UI |
+| V4 | [switch-pctltcp-sysmodule](https://github.com/gmaitxqqq/switch-pctltcp-sysmodule) | 后台 sysmodule | 固定 IP 家庭环境，开机自动运行 | 后台服务、LAN only |
+| V5 | [switch-pctltcp-remote](https://github.com/gmaitxqqq/switch-pctltcp-remote) | 后台 sysmodule | 需要远程控制（外出管理） | 远程隧道、长轮询 |
+| **V6（最终版）** | **[switch-pctltcp-remoteandlocal](https://github.com/gmaitxqqq/switch-pctltcp-remoteandlocal)** | **后台 sysmodule** | **最完善方案，双通道控制** | **远程 + 本地、高可靠** |
+
+### 演进亮点
+
+- **V1 → V2**：从本机操作到远程 TCP 管理
+- **V2 → V3**：从 TCP 协议到 HTTP + Web UI，无需安装客户端
+- **V3 → V4**：从前台 NRO 到后台 sysmodule，开机自启
+- **V4 → V5**：从纯局域网到支持远程隧道
+- **V5 → V6**：从单通道到双通道，提升可靠性
 
 ## 致谢
 
