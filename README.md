@@ -24,6 +24,7 @@ tools/package_sdmc.sh   SD 卡安装包打包脚本
 grant.conf.example      Switch 端离线码配置示例
 settings.conf.example   companion 设置密码示例
 GRANTS.md               离线码格式和使用说明
+TESTING.md              真机与模拟器测试方案
 ```
 
 ## 构建
