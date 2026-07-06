@@ -27,7 +27,10 @@
 #define PCTL_SETTINGS_U16_COUNT         (PCTL_PLAY_TIMER_SETTINGS_SIZE / 2)  /* 34 */
 #define PCTL_DAYS                       7      /* Sun..Sat */
 #define PCTL_DAY_FLAG_OFFSET(n)         (7 + 4 * (n))     /* u16 offset */
+#define PCTL_DAY_ENABLE_OFFSET(n)       (7 + 4 * (n) + 1) /* u16 offset */
 #define PCTL_DAY_MINUTES_OFFSET(n)      (7 + 4 * (n) + 2) /* u16 offset */
+#define PCTL_DAY_CONFIGURED             0x0600u
+#define PCTL_DAY_RESTRICTED             0x0100u
 #define PT_DAY_NOLIMIT                  0xFFFFu
 
 /* Play timer settings: raw u16[34] */
