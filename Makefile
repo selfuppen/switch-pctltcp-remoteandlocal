@@ -1,5 +1,5 @@
 ﻿#---------------------------------------------------------------------------------
-# Makefile for switch-pctltcp-remote
+# Makefile for switch-pctltcp-offline-grant
 # Uses switch_rules with APP_JSON to build proper NSP (NSO + NPDM)
 # Based on sys-con's approach (github.com/o0Zz/sys-con)
 #---------------------------------------------------------------------------------
@@ -74,17 +74,21 @@ export LIBPATHS	:=	$(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 #---------------------------------------------------------------------------------
 export APP_JSON := $(TOPDIR)/$(TARGET).json
 
-.PHONY: $(BUILD) clean all
+.PHONY: $(BUILD) clean all companion
 
-all: $(BUILD)
+all: $(BUILD) companion
 
 $(BUILD):
 	@[ -d $@ ] || mkdir -p $@
 	@$(MAKE) --no-print-directory -C $@ -f $(CURDIR)/Makefile
 
+companion:
+	@$(MAKE) --no-print-directory -C companion
+
 clean:
 	@echo clean ...
 	@rm -fr $(BUILD) $(TARGET).elf $(TARGET).nso $(TARGET).npdm $(TARGET).nsp
+	@$(MAKE) --no-print-directory -C companion clean
 
 #---------------------------------------------------------------------------------
 else

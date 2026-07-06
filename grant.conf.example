@@ -1,0 +1,9 @@
+{
+    "device_id": "kid-switch",
+    "grant_secret": "change-me-to-a-long-random-secret",
+    "max_add_minutes": 120,
+
+    "_comment_device_id": "must match the device value used by tools/grant_code.py",
+    "_comment_grant_secret": "shared secret used to sign offline grant codes",
+    "_comment_max_add_minutes": "largest number of minutes accepted from one offline code"
+}
