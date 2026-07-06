@@ -55,7 +55,7 @@ make clean
 ./tools/package_sdmc.sh
 ```
 
-脚本会生成 `pctltcp-offline-grant-sdmc.zip`，解压到 SD 卡根目录即可。主要路径如下：
+脚本会生成带秒级时间戳的安装包，例如 `pctltcp-offline-grant-sdmc-2026-07-06_15-04-05.zip`，解压到 SD 卡根目录即可。主要路径如下：
 
 ```text
 sdmc:/atmosphere/contents/010000000000BD23/exefs.nsp

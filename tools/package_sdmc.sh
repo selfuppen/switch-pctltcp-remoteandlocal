@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT_NAME="pctltcp-offline-grant-sdmc.zip"
+TIMESTAMP="$(date '+%Y-%m-%d_%H-%M-%S')"
+OUT_NAME="pctltcp-offline-grant-sdmc-${TIMESTAMP}.zip"
 KEEP_STAGING=0
 
 usage() {
