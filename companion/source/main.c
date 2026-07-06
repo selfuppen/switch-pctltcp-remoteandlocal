@@ -105,7 +105,10 @@ static const char *reason_to_zh(const char *reason) {
     if (strcmp(reason, "minutes_exceed_limit") == 0) return "加时时长超过允许上限。";
     if (strcmp(reason, "pctl_init_failed") == 0) return "家长控制服务初始化失败。";
     if (strcmp(reason, "pctl_read_failed") == 0) return "读取今日游玩限制失败。";
+    if (strcmp(reason, "pctl_backup_failed") == 0) return "写入备份失败，已取消本次授权以便保持可恢复。";
     if (strcmp(reason, "pctl_write_failed") == 0) return "写入今日游玩限制失败。";
+    if (strcmp(reason, "unlimited_not_allowed") == 0) return "当前未设置今日限制，安全模式下不会把无限制改成有限制。";
+    if (strcmp(reason, "disabled") == 0) return "后台控制已禁用，未执行授权。";
     if (strcmp(reason, "bad_request") == 0) return "请求格式错误。";
     if (strcmp(reason, "missing_code") == 0) return "请求中没有授权码。";
     if (strcmp(reason, "unknown_request") == 0) return "未知请求类型。";
@@ -126,9 +129,15 @@ static void set_last_result_from_sysmodule(const char *text) {
     if (sscanf(text, "{\"status\":\"ok\",\"applied_minutes\":%d,\"today_limit\":%d}",
                &applied_minutes, &today_limit) == 2) {
         char msg[256];
-        snprintf(msg, sizeof(msg),
-                 "授权成功：已增加 %d 分钟。\n今日限制已调整为 %d 分钟。",
-                 applied_minutes, today_limit);
+        if (strstr(text, "\"dry_run\":true")) {
+            snprintf(msg, sizeof(msg),
+                     "观察模式：授权码有效，预计增加 %d 分钟。\n今日限制预计调整为 %d 分钟；系统设置未被修改。",
+                     applied_minutes, today_limit);
+        } else {
+            snprintf(msg, sizeof(msg),
+                     "授权成功：已增加 %d 分钟。\n今日限制已调整为 %d 分钟。",
+                     applied_minutes, today_limit);
+        }
         set_status(UI_STATUS_SUCCESS, msg);
         return;
     }

@@ -37,6 +37,37 @@ static bool s_initialized = false;
 static TimeZoneRule s_tz_rule;
 static bool s_tz_rule_loaded = false;
 
+static Result pctl_get_current_calendar(TimeCalendarTime *cal, TimeCalendarAdditionalInfo *additional)
+{
+    if (!cal || !additional) return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+
+    u64 now_posix = 0;
+    Result rc = timeGetCurrentTime(TimeType_NetworkSystemClock, &now_posix);
+    if (R_FAILED(rc) || now_posix <= 946684800ULL) {
+        rc = timeGetCurrentTime(TimeType_LocalSystemClock, &now_posix);
+    }
+    if (R_FAILED(rc) || now_posix <= 946684800ULL) {
+        rc = timeGetCurrentTime(TimeType_UserSystemClock, &now_posix);
+    }
+    if (R_FAILED(rc) || now_posix <= 946684800ULL) {
+        return R_FAILED(rc) ? rc : MAKERESULT(Module_Libnx, LibnxError_BadInput);
+    }
+
+    rc = timeToCalendarTimeWithMyRule(now_posix, cal, additional);
+    if (R_SUCCEEDED(rc)) {
+        return 0;
+    }
+
+    if (s_tz_rule_loaded) {
+        rc = timeToCalendarTime(&s_tz_rule, now_posix, cal, additional);
+        if (R_SUCCEEDED(rc)) {
+            return 0;
+        }
+    }
+
+    return rc;
+}
+
 /* ------------------------------------------------------------------ */
 /* pctl_init: Use libnx pctlInitialize() for proper service setup      */
 /* ------------------------------------------------------------------ */
@@ -292,40 +323,9 @@ Result pctl_set_daily_limit_minutes(u32 minutes)
 
 int pctl_get_today_day(void)
 {
-    u64 now_posix = 0;
-    Result rc;
-
-    rc = timeGetCurrentTime(TimeType_NetworkSystemClock, &now_posix);
-    if (R_FAILED(rc) || now_posix <= 946684800ULL) {
-        rc = timeGetCurrentTime(TimeType_LocalSystemClock, &now_posix);
-    }
-    if (R_FAILED(rc) || now_posix <= 946684800ULL) {
-        rc = timeGetCurrentTime(TimeType_UserSystemClock, &now_posix);
-    }
-
-    if (R_SUCCEEDED(rc) && now_posix > 946684800ULL) {
-        TimeCalendarTime cal;
-        TimeCalendarAdditionalInfo additional;
-
-        rc = timeToCalendarTimeWithMyRule(now_posix, &cal, &additional);
-        if (R_SUCCEEDED(rc)) {
-            return (int)additional.wday;
-        }
-
-        if (s_tz_rule_loaded) {
-            rc = timeToCalendarTime(&s_tz_rule, now_posix, &cal, &additional);
-            if (R_SUCCEEDED(rc)) {
-                return (int)additional.wday;
-            }
-        }
-
-        {
-            time_t t = (time_t)now_posix;
-            struct tm *tm_info = gmtime(&t);
-            if (tm_info)
-                return tm_info->tm_wday;
-        }
-    }
+    int day = 0;
+    Result rc = pctl_get_today_info(&day, NULL);
+    if (R_SUCCEEDED(rc)) return day;
 
     {
         time_t t = time(NULL);
@@ -336,6 +336,23 @@ int pctl_get_today_day(void)
         }
     }
 
+    return 0;
+}
+
+Result pctl_get_today_info(int *day, u16 *date_key)
+{
+    TimeCalendarTime cal;
+    TimeCalendarAdditionalInfo additional;
+    Result rc = pctl_get_current_calendar(&cal, &additional);
+    if (R_FAILED(rc)) return rc;
+
+    if (cal.year < 2020 || cal.year > 2147 || cal.month < 1 || cal.month > 12 ||
+        cal.day < 1 || cal.day > 31 || additional.wday > 6) {
+        return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+    }
+
+    if (day) *day = (int)additional.wday;
+    if (date_key) *date_key = (u16)(((cal.year - 2020) << 9) | (cal.month << 5) | cal.day);
     return 0;
 }
 

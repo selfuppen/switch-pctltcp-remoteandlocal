@@ -181,7 +181,18 @@ static Result init_services(void) {
              (unsigned long long)test_time, (unsigned)time_rc);
     log_msg(buf);
 
-    ensure_play_timer_enabled();
+    grant_manager_log_pctl_status("boot PCTL status");
+
+    if (grant_manager_should_enforce_play_timer()) {
+        ensure_play_timer_enabled();
+    } else {
+        char mode_msg[128];
+        snprintf(mode_msg, sizeof(mode_msg),
+                 "Skipping boot play timer enforcement (mode=%s, disabled=%s).",
+                 grant_manager_control_mode_name(),
+                 grant_manager_is_disabled() ? "true" : "false");
+        log_msg(mode_msg);
+    }
     return 0;
 }
 

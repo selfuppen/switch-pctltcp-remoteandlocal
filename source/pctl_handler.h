@@ -59,6 +59,7 @@ Result pctl_set_settings(const PlayTimerSettings *settings);
 Result pctl_get_day_limit_minutes(int day, u32 *minutes);
 Result pctl_set_day_limit_minutes(int day, u32 minutes);
 Result pctl_set_daily_limit_minutes(u32 minutes);
+Result pctl_get_today_info(int *day, u16 *date_key);
 int pctl_get_today_day(void);
 Result pctl_get_daily_limit_minutes(u32 *minutes);
 Result pctl_reset_play_time(void);

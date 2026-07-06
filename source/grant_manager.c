@@ -24,6 +24,8 @@ typedef struct {
     char device_id[CFG_DEVICE_MAX];
     char grant_secret[CFG_SECRET_MAX];
     int max_add_minutes;
+    GrantControlMode control_mode;
+    bool allow_unlimited_to_limited;
     bool loaded;
 } GrantConfig;
 
@@ -38,6 +40,32 @@ typedef struct {
 
 static GrantConfig s_cfg;
 static Mutex s_pctl_mutex;
+
+static const char *control_mode_name(GrantControlMode mode) {
+    switch (mode) {
+        case GRANT_CONTROL_DISABLED: return "disabled";
+        case GRANT_CONTROL_OBSERVE:  return "observe";
+        case GRANT_CONTROL_GRANT:    return "grant";
+        case GRANT_CONTROL_ENFORCE:  return "enforce";
+        default:                     return "observe";
+    }
+}
+
+static GrantControlMode parse_control_mode(const char *text) {
+    if (!text) return GRANT_CONTROL_OBSERVE;
+    if (strcmp(text, "disabled") == 0) return GRANT_CONTROL_DISABLED;
+    if (strcmp(text, "observe") == 0) return GRANT_CONTROL_OBSERVE;
+    if (strcmp(text, "grant") == 0) return GRANT_CONTROL_GRANT;
+    if (strcmp(text, "enforce") == 0) return GRANT_CONTROL_ENFORCE;
+    return GRANT_CONTROL_OBSERVE;
+}
+
+static bool file_exists(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    fclose(f);
+    return true;
+}
 
 /* ------------------------------------------------------------------------- */
 /* Minimal JSON helpers                                                      */
@@ -77,6 +105,19 @@ static bool json_read_int(const char *value, int *out) {
     return true;
 }
 
+static bool json_read_bool(const char *value, bool *out) {
+    if (!value || !out) return false;
+    if (strncmp(value, "true", 4) == 0) {
+        *out = true;
+        return true;
+    }
+    if (strncmp(value, "false", 5) == 0) {
+        *out = false;
+        return true;
+    }
+    return false;
+}
+
 static bool read_file_text(const char *path, char *buf, size_t bufsize) {
     if (!path || !buf || bufsize == 0) return false;
     FILE *f = fopen(path, "r");
@@ -88,19 +129,33 @@ static bool read_file_text(const char *path, char *buf, size_t bufsize) {
     return true;
 }
 
-static void write_result(const char *status, const char *reason, int applied_minutes, int today_limit) {
+static void write_result_ok(int applied_minutes, int today_limit, bool dry_run) {
     char tmp_path[256];
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", GRANT_RESULT_PATH);
 
     FILE *f = fopen(tmp_path, "w");
     if (!f) return;
 
-    if (status && strcmp(status, "ok") == 0) {
-        fprintf(f, "{\"status\":\"ok\",\"applied_minutes\":%d,\"today_limit\":%d}\n",
-                applied_minutes, today_limit);
-    } else {
-        fprintf(f, "{\"status\":\"error\",\"reason\":\"%s\"}\n", reason ? reason : "unknown");
-    }
+    fprintf(f,
+            "{\"status\":\"ok\",\"applied_minutes\":%d,\"today_limit\":%d,"
+            "\"dry_run\":%s,\"mode\":\"%s\"}\n",
+            applied_minutes, today_limit, dry_run ? "true" : "false",
+            control_mode_name(s_cfg.control_mode));
+
+    fclose(f);
+    remove(GRANT_RESULT_PATH);
+    rename(tmp_path, GRANT_RESULT_PATH);
+}
+
+static void write_result_error(const char *reason) {
+    char tmp_path[256];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", GRANT_RESULT_PATH);
+
+    FILE *f = fopen(tmp_path, "w");
+    if (!f) return;
+
+    fprintf(f, "{\"status\":\"error\",\"reason\":\"%s\",\"mode\":\"%s\"}\n",
+            reason ? reason : "unknown", control_mode_name(s_cfg.control_mode));
 
     fclose(f);
     remove(GRANT_RESULT_PATH);
@@ -360,6 +415,8 @@ static uint32_t expected_mac(const uint8_t payload[GRANT_PAYLOAD_BYTES]) {
 static void load_config(void) {
     memset(&s_cfg, 0, sizeof(s_cfg));
     s_cfg.max_add_minutes = GRANT_DEFAULT_MAX_MIN;
+    s_cfg.control_mode = GRANT_CONTROL_OBSERVE;
+    s_cfg.allow_unlimited_to_limited = false;
 
     char buf[2048];
     if (!read_file_text(GRANT_CONFIG_PATH, buf, sizeof(buf))) {
@@ -378,42 +435,28 @@ static void load_config(void) {
         s_cfg.max_add_minutes = GRANT_DEFAULT_MAX_MIN;
     }
 
+    val = json_find_value(buf, "control_mode");
+    if (val) {
+        char mode[32];
+        if (json_read_string(val, mode, sizeof(mode))) {
+            s_cfg.control_mode = parse_control_mode(mode);
+        }
+    }
+
+    val = json_find_value(buf, "allow_unlimited_to_limited");
+    if (val) {
+        json_read_bool(val, &s_cfg.allow_unlimited_to_limited);
+    }
+
     s_cfg.loaded = true;
 }
 
 static bool get_current_date_key(uint16_t *date_key) {
     if (!date_key) return false;
-
-    u64 now_posix = 0;
-    Result rc = timeGetCurrentTime(TimeType_NetworkSystemClock, &now_posix);
-    if (R_FAILED(rc) || now_posix <= 946684800ULL) {
-        rc = timeGetCurrentTime(TimeType_LocalSystemClock, &now_posix);
-    }
-    if (R_FAILED(rc) || now_posix <= 946684800ULL) {
-        rc = timeGetCurrentTime(TimeType_UserSystemClock, &now_posix);
-    }
-    if (R_FAILED(rc) || now_posix <= 946684800ULL) {
-        return false;
-    }
-
-    TimeCalendarTime cal;
-    TimeCalendarAdditionalInfo additional;
-    rc = timeToCalendarTimeWithMyRule(now_posix, &cal, &additional);
-    if (R_FAILED(rc)) {
-        time_t t = (time_t)now_posix;
-        struct tm *tm_info = gmtime(&t);
-        if (!tm_info) return false;
-        cal.year = tm_info->tm_year + 1900;
-        cal.month = tm_info->tm_mon + 1;
-        cal.day = tm_info->tm_mday;
-    }
-
-    if (cal.year < 2020 || cal.year > 2147 || cal.month < 1 || cal.month > 12 ||
-        cal.day < 1 || cal.day > 31) {
-        return false;
-    }
-
-    *date_key = (uint16_t)(((cal.year - 2020) << 9) | (cal.month << 5) | cal.day);
+    u16 today_key = 0;
+    Result rc = pctl_get_today_info(NULL, &today_key);
+    if (R_FAILED(rc)) return false;
+    *date_key = today_key;
     return true;
 }
 
@@ -445,6 +488,111 @@ static bool used_nonce_append(uint16_t date_key, uint16_t nonce) {
 /* PCTL apply                                                                */
 /* ------------------------------------------------------------------------- */
 
+typedef struct {
+    PlayTimerSettings settings;
+    int today;
+    bool has_limited_today;
+    u32 today_limit;
+    u16 raw_flag;
+    u16 raw_enable;
+    u16 raw_minutes;
+} PctlTodayState;
+
+static bool read_pctl_today_state(PctlTodayState *state, const char **reason) {
+    if (!state) {
+        if (reason) *reason = "bad_request";
+        return false;
+    }
+    memset(state, 0, sizeof(*state));
+
+    Result rc = pctl_get_today_info(&state->today, NULL);
+    if (R_FAILED(rc)) {
+        if (reason) *reason = "bad_clock";
+        return false;
+    }
+
+    rc = pctl_get_settings(&state->settings);
+    if (R_FAILED(rc)) {
+        if (reason) *reason = "pctl_read_failed";
+        return false;
+    }
+
+    state->raw_flag = state->settings.raw[PCTL_DAY_FLAG_OFFSET(state->today)];
+    state->raw_enable = state->settings.raw[PCTL_DAY_ENABLE_OFFSET(state->today)];
+    state->raw_minutes = state->settings.raw[PCTL_DAY_MINUTES_OFFSET(state->today)];
+
+    state->has_limited_today =
+        state->settings.raw[0] != 0 &&
+        state->settings.raw[1] != 0 &&
+        state->raw_flag == PCTL_DAY_CONFIGURED &&
+        state->raw_enable == PCTL_DAY_RESTRICTED &&
+        state->raw_minutes != PT_DAY_NOLIMIT;
+
+    state->today_limit = state->has_limited_today ? (u32)state->raw_minutes : 0;
+    return true;
+}
+
+static bool write_pctl_backup(const PctlTodayState *state, int new_limit) {
+    if (!state) return false;
+
+    FILE *f = fopen(GRANT_BACKUP_PATH, "w");
+    if (!f) return false;
+
+    u64 now_posix = 0;
+    Result rc = timeGetCurrentTime(TimeType_NetworkSystemClock, &now_posix);
+    if (R_FAILED(rc) || now_posix <= 946684800ULL) {
+        rc = timeGetCurrentTime(TimeType_LocalSystemClock, &now_posix);
+    }
+    if (R_FAILED(rc) || now_posix <= 946684800ULL) {
+        rc = timeGetCurrentTime(TimeType_UserSystemClock, &now_posix);
+    }
+
+    fprintf(f, "version=1\n");
+    fprintf(f, "posix_time=%llu\n", (unsigned long long)(R_SUCCEEDED(rc) ? now_posix : 0));
+    fprintf(f, "control_mode=%s\n", control_mode_name(s_cfg.control_mode));
+    fprintf(f, "today=%d\n", state->today);
+    fprintf(f, "old_limited=%s\n", state->has_limited_today ? "true" : "false");
+    fprintf(f, "old_limit=%u\n", (unsigned)state->today_limit);
+    fprintf(f, "new_limit=%d\n", new_limit);
+    fprintf(f, "raw_hex=");
+    const uint8_t *raw = (const uint8_t *)state->settings.raw;
+    for (size_t i = 0; i < sizeof(state->settings.raw); i++) {
+        fprintf(f, "%02X", raw[i]);
+    }
+    fprintf(f, "\n");
+
+    fclose(f);
+    return true;
+}
+
+static bool observe_add_minutes(int minutes, int *today_limit_out, const char **reason) {
+    mutexLock(&s_pctl_mutex);
+    Result rc = pctl_init();
+    if (R_FAILED(rc)) {
+        mutexUnlock(&s_pctl_mutex);
+        *reason = "pctl_init_failed";
+        return false;
+    }
+
+    PctlTodayState state;
+    bool ok = read_pctl_today_state(&state, reason);
+    pctl_exit();
+    mutexUnlock(&s_pctl_mutex);
+
+    if (!ok) return false;
+
+    if (!state.has_limited_today && !s_cfg.allow_unlimited_to_limited) {
+        *reason = "unlimited_not_allowed";
+        return false;
+    }
+
+    int current = state.has_limited_today ? (int)state.today_limit : 0;
+    int new_limit = current + minutes;
+    if (new_limit > 1440) new_limit = 1440;
+    if (today_limit_out) *today_limit_out = new_limit;
+    return true;
+}
+
 static bool apply_add_minutes(int minutes, int *today_limit_out, const char **reason) {
     if (minutes <= 0) {
         *reason = "invalid_minutes";
@@ -463,22 +611,44 @@ static bool apply_add_minutes(int minutes, int *today_limit_out, const char **re
         return false;
     }
 
-    u32 daily_limit = 0;
-    rc = pctl_get_daily_limit_minutes(&daily_limit);
-    if (R_FAILED(rc)) {
+    PctlTodayState state;
+    if (!read_pctl_today_state(&state, reason)) {
         pctl_exit();
         mutexUnlock(&s_pctl_mutex);
-        *reason = "pctl_read_failed";
         return false;
     }
 
-    int new_limit = (int)daily_limit + minutes;
+    if (!state.has_limited_today && !s_cfg.allow_unlimited_to_limited) {
+        pctl_exit();
+        mutexUnlock(&s_pctl_mutex);
+        *reason = "unlimited_not_allowed";
+        return false;
+    }
+
+    int current_limit = state.has_limited_today ? (int)state.today_limit : 0;
+    int new_limit = current_limit + minutes;
     if (new_limit < 0) new_limit = 0;
     if (new_limit > 1440) new_limit = 1440;
 
-    int today = pctl_get_today_day();
-    rc = pctl_set_day_limit_minutes(today, (u32)new_limit);
-    if (R_SUCCEEDED(rc)) {
+    if (!write_pctl_backup(&state, new_limit)) {
+        pctl_exit();
+        mutexUnlock(&s_pctl_mutex);
+        *reason = "pctl_backup_failed";
+        return false;
+    }
+
+    PlayTimerSettings next = state.settings;
+    u16 next_val = (u16)new_limit;
+    if (next.raw[0] == 0) {
+        next.raw[0] = 0x0101;
+        next.raw[1] = 0x0001;
+    }
+    next.raw[PCTL_DAY_FLAG_OFFSET(state.today)] = PCTL_DAY_CONFIGURED;
+    next.raw[PCTL_DAY_ENABLE_OFFSET(state.today)] = PCTL_DAY_RESTRICTED;
+    next.raw[PCTL_DAY_MINUTES_OFFSET(state.today)] = next_val;
+
+    rc = pctl_set_settings(&next);
+    if (R_SUCCEEDED(rc) && s_cfg.control_mode == GRANT_CONTROL_ENFORCE) {
         pctl_stop_play_timer();
         pctl_start_play_timer();
     }
@@ -559,12 +729,18 @@ static bool apply_code(const char *code, int *applied_minutes, int *today_limit,
         return false;
     }
 
-    if (!apply_add_minutes(token.minutes, today_limit, reason)) {
-        return false;
-    }
+    if (s_cfg.control_mode == GRANT_CONTROL_OBSERVE) {
+        if (!observe_add_minutes(token.minutes, today_limit, reason)) {
+            return false;
+        }
+    } else {
+        if (!apply_add_minutes(token.minutes, today_limit, reason)) {
+            return false;
+        }
 
-    if (!used_nonce_append(token.date_key, token.nonce)) {
-        log_msg("grant: warning, used ledger append failed");
+        if (!used_nonce_append(token.date_key, token.nonce)) {
+            log_msg("grant: warning, used ledger append failed");
+        }
     }
 
     if (applied_minutes) *applied_minutes = token.minutes;
@@ -579,9 +755,16 @@ void grant_manager_init(void) {
     mutexInit(&s_pctl_mutex);
     load_config();
     if (s_cfg.loaded) {
-        log_msg("grant: config loaded");
+        char msg[160];
+        snprintf(msg, sizeof(msg), "grant: config loaded (mode=%s, allow_unlimited_to_limited=%s)",
+                 control_mode_name(s_cfg.control_mode),
+                 s_cfg.allow_unlimited_to_limited ? "true" : "false");
+        log_msg(msg);
     } else {
         log_msg("grant: config not loaded");
+    }
+    if (grant_manager_is_disabled()) {
+        log_msg("grant: fail-open disabled state active");
     }
 }
 
@@ -594,10 +777,16 @@ void grant_manager_process(void) {
     remove(GRANT_REQUEST_PATH);
     load_config();
 
+    if (grant_manager_is_disabled()) {
+        write_result_error("disabled");
+        log_msg("grant: request ignored because control is disabled");
+        return;
+    }
+
     const char *type_val = json_find_value(req, "type");
     char type[32];
     if (!type_val || !json_read_string(type_val, type, sizeof(type))) {
-        write_result("error", "bad_request", 0, 0);
+        write_result_error("bad_request");
         return;
     }
 
@@ -619,12 +808,90 @@ void grant_manager_process(void) {
     }
 
     if (ok) {
-        write_result("ok", NULL, applied, today_limit);
-        log_msg("grant: applied successfully");
+        bool dry_run = (s_cfg.control_mode == GRANT_CONTROL_OBSERVE);
+        write_result_ok(applied, today_limit, dry_run);
+        log_msg(dry_run ? "grant: validated successfully (dry run)" : "grant: applied successfully");
     } else {
-        write_result("error", reason ? reason : "unknown", 0, 0);
+        write_result_error(reason ? reason : "unknown");
         char msg[128];
         snprintf(msg, sizeof(msg), "grant: rejected (%s)", reason ? reason : "unknown");
         log_msg(msg);
     }
+}
+
+GrantControlMode grant_manager_control_mode(void) {
+    return s_cfg.control_mode;
+}
+
+const char *grant_manager_control_mode_name(void) {
+    return control_mode_name(s_cfg.control_mode);
+}
+
+bool grant_manager_is_disabled(void) {
+    return file_exists(GRANT_DISABLE_PATH) || s_cfg.control_mode == GRANT_CONTROL_DISABLED;
+}
+
+bool grant_manager_should_enforce_play_timer(void) {
+    return s_cfg.loaded && !grant_manager_is_disabled() && s_cfg.control_mode == GRANT_CONTROL_ENFORCE;
+}
+
+void grant_manager_log_pctl_status(const char *context) {
+    if (!s_cfg.loaded) {
+        log_msg("PCTL status skipped because config is not loaded");
+        return;
+    }
+    if (grant_manager_is_disabled()) {
+        log_msg("PCTL status skipped because control is disabled");
+        return;
+    }
+
+    mutexLock(&s_pctl_mutex);
+    Result rc = pctl_init();
+    if (R_FAILED(rc)) {
+        mutexUnlock(&s_pctl_mutex);
+        char msg[160];
+        snprintf(msg, sizeof(msg), "%s: pctl_init failed (0x%08X)",
+                 context ? context : "PCTL status", (unsigned)rc);
+        log_msg(msg);
+        return;
+    }
+
+    PctlTodayState state;
+    const char *reason = NULL;
+    bool ok = read_pctl_today_state(&state, &reason);
+
+    bool enabled = false;
+    Result enabled_rc = pctl_is_enabled(&enabled);
+    bool restricted = false;
+    Result restricted_rc = pctl_is_restricted(&restricted);
+    u64 remaining_ns = 0;
+    Result remaining_rc = pctl_get_remaining_time(&remaining_ns);
+
+    pctl_exit();
+    mutexUnlock(&s_pctl_mutex);
+
+    char msg[256];
+    if (ok) {
+        snprintf(msg, sizeof(msg),
+                 "%s: mode=%s today=%d limited=%s limit=%u raw=%04X/%04X/%04X enabled=%s(rc=0x%08X) restricted=%s(rc=0x%08X) remaining_min=%u(rc=0x%08X)",
+                 context ? context : "PCTL status",
+                 control_mode_name(s_cfg.control_mode),
+                 state.today,
+                 state.has_limited_today ? "true" : "false",
+                 (unsigned)state.today_limit,
+                 (unsigned)state.raw_flag,
+                 (unsigned)state.raw_enable,
+                 (unsigned)state.raw_minutes,
+                 enabled ? "true" : "false",
+                 (unsigned)enabled_rc,
+                 restricted ? "true" : "false",
+                 (unsigned)restricted_rc,
+                 R_SUCCEEDED(remaining_rc) ? (unsigned)NS_TO_MINUTES(remaining_ns) : 0,
+                 (unsigned)remaining_rc);
+    } else {
+        snprintf(msg, sizeof(msg), "%s: read failed (%s)",
+                 context ? context : "PCTL status",
+                 reason ? reason : "unknown");
+    }
+    log_msg(msg);
 }

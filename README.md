@@ -1,5 +1,7 @@
 # switch-pctltcp-offline-grant
 
+真机测试请先阅读 `SAFE_TESTING.md`。默认配置使用 `control_mode=observe`，打包脚本默认不放 `boot2.flag`，用于避免一上机就进入强控制。
+
 Nintendo Switch 家长控制离线加时工具。项目由三部分组成：
 
 - boot2 sysmodule：开机自动运行，验证离线授权码并调用 PCTL 增加当天可玩时间。
@@ -83,13 +85,17 @@ sdmc:/switch/pctltcp-sysmodule/grant.conf
 {
     "device_id": "kid-switch",
     "grant_secret": "change-me-to-a-long-random-secret",
-    "max_add_minutes": 120
+    "max_add_minutes": 120,
+    "control_mode": "observe",
+    "allow_unlimited_to_limited": false
 }
 ```
 
 - `device_id`：设备标识，生成离线码时必须一致。
 - `grant_secret`：离线码签名密钥，应使用足够长的随机字符串。
 - `max_add_minutes`：单个离线码允许增加的最大分钟数。
+- `control_mode`：默认 `observe`，只验证和读取，不写 PCTL；稳定后可切换到 `grant` 或 `enforce`。
+- `allow_unlimited_to_limited`：默认 `false`，避免把无限制/未配置的当天改成有限制。
 
 companion 设置密码保存在：
 

@@ -2,8 +2,12 @@
     "device_id": "kid-switch",
     "grant_secret": "change-me-to-a-long-random-secret",
     "max_add_minutes": 120,
+    "control_mode": "observe",
+    "allow_unlimited_to_limited": false,
 
     "_comment_device_id": "must match the device value used by tools/grant_code.py",
     "_comment_grant_secret": "shared secret used to sign offline grant codes",
-    "_comment_max_add_minutes": "largest number of minutes accepted from one offline code"
+    "_comment_max_add_minutes": "largest number of minutes accepted from one offline code",
+    "_comment_control_mode": "disabled=log only, observe=validate/read only, grant=write only on valid code, enforce=grant plus boot play-timer enforcement",
+    "_comment_allow_unlimited_to_limited": "false keeps an unlimited/unconfigured day from becoming limited during safe testing"
 }
