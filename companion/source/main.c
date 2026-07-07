@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -53,6 +54,16 @@ typedef struct {
 } UiState;
 
 typedef struct {
+    bool loaded;
+    bool read_failed;
+    bool limited_today;
+    int today_limit;
+    bool remaining_available;
+    int remaining_minutes;
+    char message[128];
+} TimeStatus;
+
+typedef struct {
     Framebuffer fb;
     FT_Library ft;
     FT_Face face;
@@ -81,10 +92,14 @@ static UiState g_state = {
     .status = UI_STATUS_IDLE,
     .message = "暂无结果。",
 };
+static TimeStatus g_time = {
+    .loaded = false,
+    .message = "正在读取时间信息...",
+};
 static PreviewState g_preview;
 
-static const Rect PRIMARY_BUTTON = {340, 190, 600, 108};
-static const Rect PREVIEW_BUTTON = {440, 320, 400, 66};
+static const Rect PRIMARY_BUTTON = {340, 220, 600, 104};
+static const Rect PREVIEW_BUTTON = {440, 350, 400, 62};
 static const PreviewFile PREVIEW_FILES[] = {
     {"grant_result.json", GRANT_RESULT_PATH},
     {"grant_request.json", GRANT_REQUEST_PATH},
@@ -224,6 +239,93 @@ static void copy_preview_line(const char *src, char *dst, size_t dst_size) {
     }
 }
 
+static const char *json_find_value(const char *json, const char *key) {
+    if (!json || !key) return NULL;
+    char pattern[96];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    const char *pos = strstr(json, pattern);
+    if (!pos) return NULL;
+    pos += strlen(pattern);
+    while (*pos == ' ' || *pos == '\t' || *pos == '\n' || *pos == '\r' || *pos == ':') {
+        pos++;
+    }
+    return pos;
+}
+
+static bool json_read_string(const char *value, char *buf, size_t bufsize) {
+    if (!value || *value != '"' || !buf || bufsize == 0) return false;
+    value++;
+    size_t i = 0;
+    while (*value && *value != '"' && i < bufsize - 1) {
+        if (*value == '\\' && *(value + 1)) value++;
+        buf[i++] = *value++;
+    }
+    buf[i] = '\0';
+    return (*value == '"');
+}
+
+static bool json_read_int(const char *value, int *out) {
+    if (!value || !out) return false;
+    char *end = NULL;
+    long val = strtol(value, &end, 10);
+    if (end == value) return false;
+    *out = (int)val;
+    return true;
+}
+
+static bool json_read_bool(const char *value, bool *out) {
+    if (!value || !out) return false;
+    if (strncmp(value, "true", 4) == 0) {
+        *out = true;
+        return true;
+    }
+    if (strncmp(value, "false", 5) == 0) {
+        *out = false;
+        return true;
+    }
+    return false;
+}
+
+static bool update_time_status_from_json(const char *text) {
+    if (!text) return false;
+
+    bool limited_today = false;
+    bool remaining_available = false;
+    int today_limit = 0;
+    int remaining_minutes = 0;
+
+    const char *val = json_find_value(text, "limited_today");
+    if (!val || !json_read_bool(val, &limited_today)) return false;
+
+    val = json_find_value(text, "today_limit");
+    if (!val || !json_read_int(val, &today_limit)) return false;
+
+    val = json_find_value(text, "remaining_available");
+    if (!val || !json_read_bool(val, &remaining_available)) return false;
+
+    val = json_find_value(text, "remaining_minutes");
+    if (val) json_read_int(val, &remaining_minutes);
+
+    g_time.loaded = true;
+    g_time.read_failed = false;
+    g_time.limited_today = limited_today;
+    g_time.today_limit = today_limit;
+    g_time.remaining_available = remaining_available;
+    g_time.remaining_minutes = remaining_minutes;
+    snprintf(g_time.message, sizeof(g_time.message), "时间信息已刷新。");
+    return true;
+}
+
+static void set_time_status_error(const char *msg) {
+    g_time.loaded = false;
+    g_time.read_failed = true;
+    g_time.limited_today = false;
+    g_time.today_limit = 0;
+    g_time.remaining_available = false;
+    g_time.remaining_minutes = 0;
+    snprintf(g_time.message, sizeof(g_time.message), "%s", msg ? msg : "无法读取时间信息。");
+}
+
 static const char *reason_to_zh(const char *reason) {
     if (!reason) return "未知错误";
     if (strcmp(reason, "config_missing") == 0) return "缺少授权配置，请检查 grant.conf。";
@@ -249,19 +351,33 @@ static const char *reason_to_zh(const char *reason) {
 }
 
 static void set_last_result_from_sysmodule(const char *text) {
-    int applied_minutes = 0;
-    int today_limit = 0;
-    char reason[96] = {0};
-
     if (!text || text[0] == '\0') {
         set_status(UI_STATUS_IDLE, "暂无结果。");
         return;
     }
 
-    if (sscanf(text, "{\"status\":\"ok\",\"applied_minutes\":%d,\"today_limit\":%d}",
-               &applied_minutes, &today_limit) == 2) {
+    char status[32] = {0};
+    const char *val = json_find_value(text, "status");
+    if (!val || !json_read_string(val, status, sizeof(status))) {
+        set_status(UI_STATUS_IDLE, text);
+        return;
+    }
+
+    if (strcmp(status, "ok") == 0) {
+        int applied_minutes = 0;
+        int today_limit = 0;
+        bool dry_run = false;
+
+        val = json_find_value(text, "applied_minutes");
+        if (val) json_read_int(val, &applied_minutes);
+        val = json_find_value(text, "today_limit");
+        if (val) json_read_int(val, &today_limit);
+        val = json_find_value(text, "dry_run");
+        if (val) json_read_bool(val, &dry_run);
+        update_time_status_from_json(text);
+
         char msg[256];
-        if (strstr(text, "\"dry_run\":true")) {
+        if (dry_run) {
             snprintf(msg, sizeof(msg),
                      "观察模式：授权码有效，预计增加 %d 分钟。\n今日限制预计调整为 %d 分钟；系统设置未被修改。",
                      applied_minutes, today_limit);
@@ -274,7 +390,20 @@ static void set_last_result_from_sysmodule(const char *text) {
         return;
     }
 
-    if (sscanf(text, "{\"status\":\"error\",\"reason\":\"%95[^\"]\"}", reason) == 1) {
+    if (strcmp(status, "status") == 0) {
+        if (update_time_status_from_json(text)) {
+            set_status(UI_STATUS_IDLE, "时间信息已刷新。");
+        } else {
+            set_time_status_error("时间结果格式不完整。");
+            set_status(UI_STATUS_ERROR, "时间结果格式不完整。");
+        }
+        return;
+    }
+
+    if (strcmp(status, "error") == 0) {
+        char reason[96] = {0};
+        val = json_find_value(text, "reason");
+        if (val) json_read_string(val, reason, sizeof(reason));
         char msg[256];
         snprintf(msg, sizeof(msg), "授权失败：%s", reason_to_zh(reason));
         set_status(UI_STATUS_ERROR, msg);
@@ -526,8 +655,55 @@ static void draw_button(uint32_t *fb, uint32_t stride, Rect rect, const char *ti
     }
 }
 
+static void format_limit_text(char *buf, size_t size) {
+    if (!buf || size == 0) return;
+
+    if (g_time.read_failed) {
+        snprintf(buf, size, "无法读取");
+    } else if (!g_time.loaded) {
+        snprintf(buf, size, "正在读取");
+    } else if (!g_time.limited_today) {
+        snprintf(buf, size, "未设置限制");
+    } else {
+        snprintf(buf, size, "%d 分钟", g_time.today_limit);
+    }
+}
+
+static void format_remaining_text(char *buf, size_t size) {
+    if (!buf || size == 0) return;
+
+    if (g_time.read_failed) {
+        snprintf(buf, size, "无法读取");
+    } else if (!g_time.loaded) {
+        snprintf(buf, size, "正在读取");
+    } else if (!g_time.remaining_available) {
+        snprintf(buf, size, "无法读取");
+    } else {
+        snprintf(buf, size, "%d 分钟", g_time.remaining_minutes);
+    }
+}
+
+static void draw_time_tile(uint32_t *fb, uint32_t stride, Rect rect, const char *label,
+                           const char *value, uint32_t accent) {
+    fill_round_rect(fb, stride, rect, 16, RGBA(255, 255, 255, 255));
+    draw_border(fb, stride, rect, RGBA(219, 226, 236, 255));
+    fill_round_rect(fb, stride, (Rect){rect.x + 20, rect.y + 16, 8, rect.h - 32}, 4, accent);
+    draw_text(fb, stride, rect.x + 44, rect.y + 26, label, 20, RGBA(83, 96, 114, 255));
+    draw_text(fb, stride, rect.x + 44, rect.y + 56, value, 28, RGBA(31, 42, 58, 255));
+}
+
+static void draw_time_status(uint32_t *fb, uint32_t stride) {
+    char limit[64];
+    char remaining[64];
+    format_limit_text(limit, sizeof(limit));
+    format_remaining_text(remaining, sizeof(remaining));
+
+    draw_time_tile(fb, stride, (Rect){220, 146, 400, 62}, "今日额度", limit, RGBA(48, 113, 204, 255));
+    draw_time_tile(fb, stride, (Rect){660, 146, 400, 62}, "剩余时间", remaining, RGBA(43, 153, 95, 255));
+}
+
 static void draw_status_card(uint32_t *fb, uint32_t stride) {
-    Rect card = {220, 420, 840, 148};
+    Rect card = {220, 444, 840, 142};
     uint32_t accent = RGBA(111, 126, 147, 255);
     const char *title = "最近结果";
 
@@ -563,6 +739,8 @@ static void draw_ui(void) {
     draw_text(fb, stride, 78, 118, "输入家长给你的离线授权码，就能临时增加今天的游玩时间。", 25,
               RGBA(83, 96, 114, 255));
 
+    draw_time_status(fb, stride);
+
     draw_button(fb, stride, PRIMARY_BUTTON, "输入授权码", "触摸这里或按 A", g_state.button_pressed,
                 RGBA(48, 113, 204, 255), RGBA(37, 96, 174, 255));
     draw_button(fb, stride, PREVIEW_BUTTON, "查看文件", "按 B，需要设置密码", g_state.preview_button_pressed,
@@ -572,7 +750,7 @@ static void draw_ui(void) {
 
     draw_key_hint(fb, stride, 80, "A", "输入授权码");
     draw_key_hint(fb, stride, 302, "B", "查看文件");
-    draw_key_hint(fb, stride, 502, "Y", "刷新");
+    draw_key_hint(fb, stride, 502, "Y", "刷新时间");
     draw_key_hint(fb, stride, 654, "X", "长按设置");
     draw_key_hint(fb, stride, 882, "+", "退出");
 
@@ -781,6 +959,68 @@ static void wait_result(void) {
     set_status(UI_STATUS_ERROR, "等待后台授权结果超时，请稍后重试。");
 }
 
+static bool apply_time_status_response(const char *text, bool show_message) {
+    char status[32] = {0};
+    const char *val = json_find_value(text, "status");
+    if (!val || !json_read_string(val, status, sizeof(status))) {
+        set_time_status_error("时间结果格式错误。");
+        if (show_message) set_status(UI_STATUS_ERROR, "时间结果格式错误。");
+        return false;
+    }
+
+    if (strcmp(status, "status") == 0 || strcmp(status, "ok") == 0) {
+        if (!update_time_status_from_json(text)) {
+            set_time_status_error("时间结果格式不完整。");
+            if (show_message) set_status(UI_STATUS_ERROR, "时间结果格式不完整。");
+            return false;
+        }
+        if (show_message) set_status(UI_STATUS_IDLE, "时间信息已刷新。");
+        return true;
+    }
+
+    if (strcmp(status, "error") == 0) {
+        char reason[96] = {0};
+        val = json_find_value(text, "reason");
+        if (val) json_read_string(val, reason, sizeof(reason));
+
+        char msg[192];
+        snprintf(msg, sizeof(msg), "读取时间失败：%s", reason_to_zh(reason));
+        set_time_status_error(msg);
+        if (show_message) set_status(UI_STATUS_ERROR, msg);
+        return false;
+    }
+
+    set_time_status_error("未知时间结果。");
+    if (show_message) set_status(UI_STATUS_ERROR, "未知时间结果。");
+    return false;
+}
+
+static void request_time_status(bool show_message) {
+    if (!write_request("{\"type\":\"status\"}")) {
+        set_time_status_error("写入时间查询请求失败。");
+        if (show_message) set_status(UI_STATUS_ERROR, "写入时间查询请求失败，请检查 SD 卡。");
+        return;
+    }
+
+    g_time.loaded = false;
+    g_time.read_failed = false;
+    snprintf(g_time.message, sizeof(g_time.message), "正在刷新时间信息...");
+    if (show_message) set_status(UI_STATUS_WAITING, "正在刷新时间信息...");
+
+    char result[512];
+    for (int i = 0; i < 25; i++) {
+        if (read_text(GRANT_RESULT_PATH, result, sizeof(result))) {
+            apply_time_status_response(result, show_message);
+            return;
+        }
+        draw_ui();
+        svcSleepThread(500000000ULL);
+    }
+
+    set_time_status_error("刷新时间超时。");
+    if (show_message) set_status(UI_STATUS_ERROR, "刷新时间超时，请稍后重试。");
+}
+
 static void request_offline_code(void) {
     char code[64] = {0};
     if (!show_keyboard("输入离线授权码", "示例：ABCD-EFGH-JKQ2-M7P9", code, sizeof(code))) {
@@ -929,6 +1169,7 @@ int main(int argc, char **argv) {
     if (read_text(GRANT_RESULT_PATH, result, sizeof(result))) {
         set_last_result_from_sysmodule(result);
     }
+    request_time_status(false);
 
     while (appletMainLoop()) {
         padUpdate(&pad);
@@ -964,11 +1205,7 @@ int main(int argc, char **argv) {
         }
 
         if (down & HidNpadButton_Y) {
-            if (read_text(GRANT_RESULT_PATH, result, sizeof(result))) {
-                set_last_result_from_sysmodule(result);
-            } else {
-                set_status(UI_STATUS_IDLE, "没有找到上次授权结果。");
-            }
+            request_time_status(true);
         }
 
         draw_ui();

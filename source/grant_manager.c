@@ -129,7 +129,15 @@ static bool read_file_text(const char *path, char *buf, size_t bufsize) {
     return true;
 }
 
-static void write_result_ok(int applied_minutes, int today_limit, bool dry_run) {
+typedef struct {
+    bool limited_today;
+    int today_limit;
+    bool remaining_available;
+    u32 remaining_minutes;
+} PctlStatusResult;
+
+static void write_result_ok(int applied_minutes, int today_limit, bool dry_run,
+                            const PctlStatusResult *status) {
     char tmp_path[256];
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", GRANT_RESULT_PATH);
 
@@ -138,9 +146,14 @@ static void write_result_ok(int applied_minutes, int today_limit, bool dry_run) 
 
     fprintf(f,
             "{\"status\":\"ok\",\"applied_minutes\":%d,\"today_limit\":%d,"
-            "\"dry_run\":%s,\"mode\":\"%s\"}\n",
+            "\"dry_run\":%s,\"mode\":\"%s\","
+            "\"limited_today\":%s,\"remaining_available\":%s,"
+            "\"remaining_minutes\":%u}\n",
             applied_minutes, today_limit, dry_run ? "true" : "false",
-            control_mode_name(s_cfg.control_mode));
+            control_mode_name(s_cfg.control_mode),
+            status && status->limited_today ? "true" : "false",
+            status && status->remaining_available ? "true" : "false",
+            status && status->remaining_available ? (unsigned)status->remaining_minutes : 0);
 
     fclose(f);
     remove(GRANT_RESULT_PATH);
@@ -156,6 +169,28 @@ static void write_result_error(const char *reason) {
 
     fprintf(f, "{\"status\":\"error\",\"reason\":\"%s\",\"mode\":\"%s\"}\n",
             reason ? reason : "unknown", control_mode_name(s_cfg.control_mode));
+
+    fclose(f);
+    remove(GRANT_RESULT_PATH);
+    rename(tmp_path, GRANT_RESULT_PATH);
+}
+
+static void write_result_status(const PctlStatusResult *status) {
+    char tmp_path[256];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", GRANT_RESULT_PATH);
+
+    FILE *f = fopen(tmp_path, "w");
+    if (!f) return;
+
+    fprintf(f,
+            "{\"status\":\"status\",\"today_limit\":%d,"
+            "\"limited_today\":%s,\"remaining_available\":%s,"
+            "\"remaining_minutes\":%u,\"mode\":\"%s\"}\n",
+            status ? status->today_limit : 0,
+            status && status->limited_today ? "true" : "false",
+            status && status->remaining_available ? "true" : "false",
+            status && status->remaining_available ? (unsigned)status->remaining_minutes : 0,
+            control_mode_name(s_cfg.control_mode));
 
     fclose(f);
     remove(GRANT_RESULT_PATH);
@@ -532,6 +567,40 @@ static bool read_pctl_today_state(PctlTodayState *state, const char **reason) {
     return true;
 }
 
+static bool read_current_pctl_status(PctlStatusResult *status, const char **reason) {
+    if (!status) {
+        if (reason) *reason = "bad_request";
+        return false;
+    }
+    memset(status, 0, sizeof(*status));
+
+    mutexLock(&s_pctl_mutex);
+    Result rc = pctl_init();
+    if (R_FAILED(rc)) {
+        mutexUnlock(&s_pctl_mutex);
+        if (reason) *reason = "pctl_init_failed";
+        return false;
+    }
+
+    PctlTodayState state;
+    bool ok = read_pctl_today_state(&state, reason);
+    if (ok) {
+        status->limited_today = state.has_limited_today;
+        status->today_limit = state.has_limited_today ? (int)state.today_limit : 0;
+
+        u64 remaining_ns = 0;
+        rc = pctl_get_remaining_time(&remaining_ns);
+        if (R_SUCCEEDED(rc)) {
+            status->remaining_available = true;
+            status->remaining_minutes = NS_TO_MINUTES(remaining_ns);
+        }
+    }
+
+    pctl_exit();
+    mutexUnlock(&s_pctl_mutex);
+    return ok;
+}
+
 static bool write_pctl_backup(const PctlTodayState *state, int new_limit) {
     if (!state) return false;
 
@@ -790,6 +859,21 @@ void grant_manager_process(void) {
         return;
     }
 
+    if (strcmp(type, "status") == 0) {
+        PctlStatusResult status;
+        const char *reason = NULL;
+        if (read_current_pctl_status(&status, &reason)) {
+            write_result_status(&status);
+            log_msg("grant: status refreshed");
+        } else {
+            write_result_error(reason ? reason : "unknown");
+            char msg[128];
+            snprintf(msg, sizeof(msg), "grant: status refresh failed (%s)", reason ? reason : "unknown");
+            log_msg(msg);
+        }
+        return;
+    }
+
     int applied = 0;
     int today_limit = 0;
     const char *reason = NULL;
@@ -809,7 +893,13 @@ void grant_manager_process(void) {
 
     if (ok) {
         bool dry_run = (s_cfg.control_mode == GRANT_CONTROL_OBSERVE);
-        write_result_ok(applied, today_limit, dry_run);
+        PctlStatusResult status;
+        if (!read_current_pctl_status(&status, NULL)) {
+            memset(&status, 0, sizeof(status));
+            status.limited_today = today_limit > 0;
+            status.today_limit = today_limit;
+        }
+        write_result_ok(applied, today_limit, dry_run, &status);
         log_msg(dry_run ? "grant: validated successfully (dry run)" : "grant: applied successfully");
     } else {
         write_result_error(reason ? reason : "unknown");
