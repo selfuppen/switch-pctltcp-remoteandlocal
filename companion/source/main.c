@@ -14,11 +14,17 @@
 #define GRANT_REQUEST_PATH GRANT_DIR "/grant_request.json"
 #define GRANT_RESULT_PATH  GRANT_DIR "/grant_result.json"
 #define SETTINGS_PATH      GRANT_DIR "/settings.conf"
+#define SYSMODULE_LOG_PATH GRANT_DIR "/sysmodule.log"
+#define SYSMODULE_OLD_LOG_PATH GRANT_DIR "/sysmodule.log.old"
+#define GRANT_CONFIG_PATH  GRANT_DIR "/grant.conf"
 #define DEFAULT_PASSWORD   "1234"
 
 #define SCREEN_W 1280
 #define SCREEN_H 720
 #define X_HOLD_FRAMES 48
+#define PREVIEW_MAX_BYTES 8192
+#define PREVIEW_LINE_COUNT 15
+#define PREVIEW_LINE_MAX 104
 
 #define RGBA(r, g, b, a) ((uint32_t)((r) | ((g) << 8) | ((b) << 16) | ((a) << 24)))
 
@@ -40,6 +46,7 @@ typedef struct {
     UiStatus status;
     char message[512];
     bool button_pressed;
+    bool preview_button_pressed;
     int x_hold_frames;
     bool settings_triggered;
     bool touch_was_down;
@@ -53,13 +60,40 @@ typedef struct {
     bool font_ready;
 } UiRuntime;
 
+typedef struct {
+    const char *name;
+    const char *path;
+} PreviewFile;
+
+typedef struct {
+    int file_index;
+    int scroll_line;
+    int line_count;
+    bool exists;
+    bool truncated;
+    char status[128];
+    char text[PREVIEW_MAX_BYTES + 1];
+    const char *lines[PREVIEW_MAX_BYTES + 1];
+} PreviewState;
+
 static UiRuntime g_ui;
 static UiState g_state = {
     .status = UI_STATUS_IDLE,
     .message = "暂无结果。",
 };
+static PreviewState g_preview;
 
-static const Rect PRIMARY_BUTTON = {340, 214, 600, 118};
+static const Rect PRIMARY_BUTTON = {340, 190, 600, 108};
+static const Rect PREVIEW_BUTTON = {440, 320, 400, 66};
+static const PreviewFile PREVIEW_FILES[] = {
+    {"grant_result.json", GRANT_RESULT_PATH},
+    {"grant_request.json", GRANT_REQUEST_PATH},
+    {"sysmodule.log", SYSMODULE_LOG_PATH},
+    {"sysmodule.log.old", SYSMODULE_OLD_LOG_PATH},
+    {"grant.conf", GRANT_CONFIG_PATH},
+    {"settings.conf", SETTINGS_PATH},
+};
+static const int PREVIEW_FILE_COUNT = (int)(sizeof(PREVIEW_FILES) / sizeof(PREVIEW_FILES[0]));
 
 static void set_status(UiStatus status, const char *msg) {
     g_state.status = status;
@@ -90,6 +124,104 @@ static bool read_text(const char *path, char *buf, size_t size) {
     if (n == 0) return false;
     buf[n] = '\0';
     return true;
+}
+
+static bool read_preview_text(const char *path, PreviewState *state) {
+    if (!path || !state) return false;
+
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        state->text[0] = '\0';
+        state->line_count = 0;
+        state->exists = false;
+        state->truncated = false;
+        snprintf(state->status, sizeof(state->status), "文件不存在或无法读取。");
+        return false;
+    }
+
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    if (size < 0) size = 0;
+
+    long offset = 0;
+    state->truncated = false;
+    if (size > PREVIEW_MAX_BYTES) {
+        offset = size - PREVIEW_MAX_BYTES;
+        state->truncated = true;
+    }
+    fseek(f, offset, SEEK_SET);
+
+    size_t n = fread(state->text, 1, PREVIEW_MAX_BYTES, f);
+    fclose(f);
+    state->text[n] = '\0';
+
+    state->exists = true;
+    if (n == 0) {
+        state->line_count = 0;
+        snprintf(state->status, sizeof(state->status), "文件为空。");
+        return true;
+    }
+
+    state->line_count = 0;
+    char *p = state->text;
+    while (*p && state->line_count < (int)(sizeof(state->lines) / sizeof(state->lines[0]))) {
+        state->lines[state->line_count++] = p;
+        while (*p && *p != '\n' && *p != '\r') {
+            p++;
+        }
+        if (*p == '\r') {
+            *p++ = '\0';
+            if (*p == '\n') p++;
+        } else if (*p == '\n') {
+            *p++ = '\0';
+        }
+    }
+
+    if (state->truncated) {
+        snprintf(state->status, sizeof(state->status), "仅显示最后 %d 字节。", PREVIEW_MAX_BYTES);
+    } else {
+        snprintf(state->status, sizeof(state->status), "显示完整文件。");
+    }
+    return true;
+}
+
+static void load_preview_file(void) {
+    if (g_preview.file_index < 0) g_preview.file_index = 0;
+    if (g_preview.file_index >= PREVIEW_FILE_COUNT) g_preview.file_index = PREVIEW_FILE_COUNT - 1;
+    g_preview.scroll_line = 0;
+    read_preview_text(PREVIEW_FILES[g_preview.file_index].path, &g_preview);
+}
+
+static void copy_preview_line(const char *src, char *dst, size_t dst_size) {
+    if (!dst || dst_size == 0) return;
+    if (!src) {
+        dst[0] = '\0';
+        return;
+    }
+
+    size_t j = 0;
+    bool truncated = false;
+    for (size_t i = 0; src[i] && j + 1 < dst_size; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (c == '\t') {
+            int spaces = 4 - (int)(j % 4);
+            while (spaces-- > 0 && j + 1 < dst_size) dst[j++] = ' ';
+        } else if (c < 0x20) {
+            dst[j++] = ' ';
+        } else {
+            dst[j++] = src[i];
+        }
+        if (src[i + 1] && j + 1 >= dst_size) truncated = true;
+    }
+
+    if (truncated && dst_size > 4) {
+        dst[dst_size - 4] = '.';
+        dst[dst_size - 3] = '.';
+        dst[dst_size - 2] = '.';
+        dst[dst_size - 1] = '\0';
+    } else {
+        dst[j] = '\0';
+    }
 }
 
 static const char *reason_to_zh(const char *reason) {
@@ -379,8 +511,23 @@ static void draw_key_hint(uint32_t *fb, uint32_t stride, int x, const char *key,
     draw_text(fb, stride, x + 52, 680, label, 24, RGBA(73, 86, 105, 255));
 }
 
+static void draw_button(uint32_t *fb, uint32_t stride, Rect rect, const char *title, const char *subtitle,
+                        bool pressed, uint32_t color, uint32_t pressed_color) {
+    Rect shadow = {rect.x, rect.y + 8, rect.w, rect.h};
+    fill_round_rect(fb, stride, shadow, 24, RGBA(203, 216, 235, 255));
+    fill_round_rect(fb, stride, rect, 24, pressed ? pressed_color : color);
+    if (subtitle) {
+        draw_text_center(fb, stride, (Rect){rect.x, rect.y, rect.w, rect.h / 2 + 10},
+                         title, rect.h > 80 ? 38 : 26, RGBA(255, 255, 255, 255));
+        draw_text_center(fb, stride, (Rect){rect.x, rect.y + rect.h / 2, rect.w, rect.h / 2},
+                         subtitle, 22, RGBA(224, 237, 255, 255));
+    } else {
+        draw_text_center(fb, stride, rect, title, rect.h > 80 ? 40 : 28, RGBA(255, 255, 255, 255));
+    }
+}
+
 static void draw_status_card(uint32_t *fb, uint32_t stride) {
-    Rect card = {220, 390, 840, 178};
+    Rect card = {220, 420, 840, 148};
     uint32_t accent = RGBA(111, 126, 147, 255);
     const char *title = "最近结果";
 
@@ -397,9 +544,9 @@ static void draw_status_card(uint32_t *fb, uint32_t stride) {
 
     fill_round_rect(fb, stride, card, 18, RGBA(255, 255, 255, 255));
     draw_border(fb, stride, card, RGBA(219, 226, 236, 255));
-    fill_round_rect(fb, stride, (Rect){card.x + 28, card.y + 28, 12, 96}, 6, accent);
-    draw_text(fb, stride, card.x + 62, card.y + 58, title, 30, accent);
-    draw_text(fb, stride, card.x + 62, card.y + 105, g_state.message, 26, RGBA(37, 49, 67, 255));
+    fill_round_rect(fb, stride, (Rect){card.x + 28, card.y + 28, 12, 86}, 6, accent);
+    draw_text(fb, stride, card.x + 62, card.y + 52, title, 30, accent);
+    draw_text(fb, stride, card.x + 62, card.y + 94, g_state.message, 24, RGBA(37, 49, 67, 255));
 }
 
 static void draw_ui(void) {
@@ -416,21 +563,84 @@ static void draw_ui(void) {
     draw_text(fb, stride, 78, 118, "输入家长给你的离线授权码，就能临时增加今天的游玩时间。", 25,
               RGBA(83, 96, 114, 255));
 
-    Rect shadow = {PRIMARY_BUTTON.x + 0, PRIMARY_BUTTON.y + 8, PRIMARY_BUTTON.w, PRIMARY_BUTTON.h};
-    fill_round_rect(fb, stride, shadow, 24, RGBA(203, 216, 235, 255));
-
-    uint32_t button_color = g_state.button_pressed ? RGBA(37, 96, 174, 255) : RGBA(48, 113, 204, 255);
-    fill_round_rect(fb, stride, PRIMARY_BUTTON, 24, button_color);
-    draw_text_center(fb, stride, PRIMARY_BUTTON, "输入授权码", 40, RGBA(255, 255, 255, 255));
-    draw_text_center(fb, stride, (Rect){PRIMARY_BUTTON.x, PRIMARY_BUTTON.y + 58, PRIMARY_BUTTON.w, 58},
-                     "触摸这里或按 A", 24, RGBA(224, 237, 255, 255));
+    draw_button(fb, stride, PRIMARY_BUTTON, "输入授权码", "触摸这里或按 A", g_state.button_pressed,
+                RGBA(48, 113, 204, 255), RGBA(37, 96, 174, 255));
+    draw_button(fb, stride, PREVIEW_BUTTON, "查看文件", "按 B，需要设置密码", g_state.preview_button_pressed,
+                RGBA(73, 86, 105, 255), RGBA(52, 64, 82, 255));
 
     draw_status_card(fb, stride);
 
     draw_key_hint(fb, stride, 80, "A", "输入授权码");
-    draw_key_hint(fb, stride, 322, "Y", "刷新");
-    draw_key_hint(fb, stride, 474, "X", "长按设置");
-    draw_key_hint(fb, stride, 702, "+", "退出");
+    draw_key_hint(fb, stride, 302, "B", "查看文件");
+    draw_key_hint(fb, stride, 502, "Y", "刷新");
+    draw_key_hint(fb, stride, 654, "X", "长按设置");
+    draw_key_hint(fb, stride, 882, "+", "退出");
+
+    framebufferEnd(&g_ui.fb);
+}
+
+static void draw_preview_ui(void) {
+    uint32_t stride_bytes = 0;
+    uint32_t *fb = (uint32_t *)framebufferBegin(&g_ui.fb, &stride_bytes);
+    if (!fb) return;
+    uint32_t stride = stride_bytes / sizeof(uint32_t);
+
+    fill_rect(fb, stride, (Rect){0, 0, SCREEN_W, SCREEN_H}, RGBA(242, 246, 252, 255));
+    fill_rect(fb, stride, (Rect){0, 0, SCREEN_W, 104}, RGBA(255, 255, 255, 255));
+    fill_rect(fb, stride, (Rect){0, 102, SCREEN_W, 2}, RGBA(222, 229, 239, 255));
+
+    const PreviewFile *file = &PREVIEW_FILES[g_preview.file_index];
+    char header[128];
+    snprintf(header, sizeof(header), "文件预览：%s", file->name);
+    draw_text(fb, stride, 76, 66, header, 34, RGBA(31, 42, 58, 255));
+
+    char meta[160];
+    snprintf(meta, sizeof(meta), "%d/%d  %s", g_preview.file_index + 1, PREVIEW_FILE_COUNT, file->path);
+    draw_text(fb, stride, 78, 118, meta, 22, RGBA(83, 96, 114, 255));
+
+    Rect panel = {76, 150, 1128, 452};
+    fill_round_rect(fb, stride, panel, 14, RGBA(255, 255, 255, 255));
+    draw_border(fb, stride, panel, RGBA(219, 226, 236, 255));
+
+    draw_text(fb, stride, panel.x + 24, panel.y + 38, g_preview.status, 22, RGBA(73, 86, 105, 255));
+
+    if (!g_preview.exists || g_preview.line_count == 0) {
+        const char *empty = g_preview.exists ? "没有可显示的内容。" : "请确认文件已生成并且 SD 卡可读。";
+        draw_text(fb, stride, panel.x + 24, panel.y + 100, empty, 28, RGBA(37, 49, 67, 255));
+    } else {
+        int max_scroll = g_preview.line_count > PREVIEW_LINE_COUNT ?
+                         g_preview.line_count - PREVIEW_LINE_COUNT : 0;
+        if (g_preview.scroll_line > max_scroll) g_preview.scroll_line = max_scroll;
+        if (g_preview.scroll_line < 0) g_preview.scroll_line = 0;
+
+        char scroll[64];
+        snprintf(scroll, sizeof(scroll), "行 %d-%d / %d",
+                 g_preview.scroll_line + 1,
+                 g_preview.scroll_line + PREVIEW_LINE_COUNT < g_preview.line_count ?
+                     g_preview.scroll_line + PREVIEW_LINE_COUNT : g_preview.line_count,
+                 g_preview.line_count);
+        draw_text(fb, stride, panel.x + panel.w - 180, panel.y + 38, scroll, 20, RGBA(111, 126, 147, 255));
+
+        for (int i = 0; i < PREVIEW_LINE_COUNT; i++) {
+            int line_index = g_preview.scroll_line + i;
+            if (line_index >= g_preview.line_count) break;
+
+            char line[PREVIEW_LINE_MAX];
+            char prefix[16];
+            copy_preview_line(g_preview.lines[line_index], line, sizeof(line));
+            snprintf(prefix, sizeof(prefix), "%4d", line_index + 1);
+            int y = panel.y + 82 + i * 24;
+            draw_text(fb, stride, panel.x + 24, y, prefix, 18, RGBA(144, 156, 174, 255));
+            draw_text(fb, stride, panel.x + 86, y, line, 18, RGBA(37, 49, 67, 255));
+        }
+    }
+
+    draw_key_hint(fb, stride, 80, "L", "上个文件");
+    draw_key_hint(fb, stride, 260, "R", "下个文件");
+    draw_key_hint(fb, stride, 440, "↑↓", "滚动");
+    draw_key_hint(fb, stride, 602, "Y", "重读");
+    draw_key_hint(fb, stride, 744, "B", "返回");
+    draw_key_hint(fb, stride, 886, "+", "退出");
 
     framebufferEnd(&g_ui.fb);
 }
@@ -439,21 +649,30 @@ static bool point_in_rect(int x, int y, Rect rect) {
     return x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h;
 }
 
-static bool hit_test_primary_button(void) {
+static void update_touch_buttons(bool *primary_pressed, bool *preview_pressed) {
+    if (primary_pressed) *primary_pressed = false;
+    if (preview_pressed) *preview_pressed = false;
+
     HidTouchScreenState touch_state = {0};
     if (hidGetTouchScreenStates(&touch_state, 1) < 1 || touch_state.count < 1) {
         g_state.button_pressed = false;
+        g_state.preview_button_pressed = false;
         g_state.touch_was_down = false;
-        return false;
+        return;
     }
 
     int x = (int)touch_state.touches[0].x;
     int y = (int)touch_state.touches[0].y;
-    bool inside = point_in_rect(x, y, PRIMARY_BUTTON);
-    bool just_pressed = inside && !g_state.touch_was_down;
-    g_state.button_pressed = inside;
+    bool primary_inside = point_in_rect(x, y, PRIMARY_BUTTON);
+    bool preview_inside = point_in_rect(x, y, PREVIEW_BUTTON);
+    bool just_pressed = !g_state.touch_was_down;
+
+    g_state.button_pressed = primary_inside;
+    g_state.preview_button_pressed = preview_inside;
     g_state.touch_was_down = true;
-    return just_pressed;
+
+    if (primary_pressed) *primary_pressed = primary_inside && just_pressed;
+    if (preview_pressed) *preview_pressed = preview_inside && just_pressed;
 }
 
 static bool init_ui(void) {
@@ -617,6 +836,76 @@ static void open_settings(void) {
     set_status(UI_STATUS_SUCCESS, "设置密码已更新。");
 }
 
+static bool check_settings_password(const char *cancel_msg) {
+    char current[64];
+    char entered[64] = {0};
+    read_password(current, sizeof(current));
+
+    if (!show_keyboard("设置密码", "请输入当前设置密码", entered, sizeof(entered))) {
+        set_status(UI_STATUS_IDLE, cancel_msg ? cancel_msg : "已取消。");
+        return false;
+    }
+    trim_line(entered);
+
+    if (strcmp(entered, current) != 0) {
+        set_status(UI_STATUS_ERROR, "设置密码错误。");
+        return false;
+    }
+
+    return true;
+}
+
+static bool open_file_preview(void) {
+    if (!check_settings_password("已取消查看文件。")) {
+        return true;
+    }
+
+    load_preview_file();
+    g_state.button_pressed = false;
+    g_state.preview_button_pressed = false;
+    g_state.touch_was_down = false;
+
+    PadState pad;
+    padInitializeDefault(&pad);
+
+    while (appletMainLoop()) {
+        padUpdate(&pad);
+        u64 down = padGetButtonsDown(&pad);
+
+        if (down & HidNpadButton_Plus) {
+            return false;
+        }
+        if (down & HidNpadButton_B) {
+            return true;
+        }
+        if (down & HidNpadButton_L) {
+            g_preview.file_index--;
+            if (g_preview.file_index < 0) g_preview.file_index = PREVIEW_FILE_COUNT - 1;
+            load_preview_file();
+        }
+        if (down & HidNpadButton_R) {
+            g_preview.file_index++;
+            if (g_preview.file_index >= PREVIEW_FILE_COUNT) g_preview.file_index = 0;
+            load_preview_file();
+        }
+        if (down & HidNpadButton_Up) {
+            if (g_preview.scroll_line > 0) g_preview.scroll_line--;
+        }
+        if (down & HidNpadButton_Down) {
+            int max_scroll = g_preview.line_count > PREVIEW_LINE_COUNT ?
+                             g_preview.line_count - PREVIEW_LINE_COUNT : 0;
+            if (g_preview.scroll_line < max_scroll) g_preview.scroll_line++;
+        }
+        if (down & HidNpadButton_Y) {
+            load_preview_file();
+        }
+
+        draw_preview_ui();
+    }
+
+    return false;
+}
+
 int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
@@ -650,9 +939,17 @@ int main(int argc, char **argv) {
             break;
         }
 
-        bool touch_primary = hit_test_primary_button();
+        bool touch_primary = false;
+        bool touch_preview = false;
+        update_touch_buttons(&touch_primary, &touch_preview);
         if ((down & HidNpadButton_A) || touch_primary) {
             request_offline_code();
+        }
+
+        if ((down & HidNpadButton_B) || touch_preview) {
+            if (!open_file_preview()) {
+                break;
+            }
         }
 
         if (held & HidNpadButton_X) {

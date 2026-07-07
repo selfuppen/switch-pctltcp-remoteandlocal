@@ -61,6 +61,7 @@ companion/pctltcp-grant.nro
 菜单：
 
 - `A`：输入离线授权码。
+- `B`：输入设置密码后查看 `grant_result.json`、`grant_request.json`、`sysmodule.log`、`grant.conf`、`settings.conf` 等文件。
 - `X`：进入设置，输入当前密码后修改密码。
 - `Y`：重新读取上一次 sysmodule 执行结果。
 - `Plus`：退出。
@@ -74,6 +75,7 @@ sdmc:/switch/pctltcp-sysmodule/settings.conf
 缺失或为空时默认密码为 `1234`。
 
 NRO 会写入 `grant_request.json`，sysmodule 会写入 `grant_result.json`。
+文件预览会显示配置内容，其中 `grant.conf` 可能包含 `grant_secret`，`settings.conf` 可能包含明文设置密码。
 
 ## 打包到 SD 卡
 

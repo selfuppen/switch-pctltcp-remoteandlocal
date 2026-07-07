@@ -137,11 +137,13 @@ python tools/grant_code.py \
 打开 `pctltcp-grant.nro`：
 
 - `A`：输入离线授权码。
+- `B`：输入设置密码后查看 `grant_result.json`、`grant_request.json`、`sysmodule.log`、`grant.conf`、`settings.conf` 等文件。
 - `X`：进入设置，输入当前密码后修改密码。
 - `Y`：刷新上一次 sysmodule 执行结果。
 - `Plus`：退出。
 
 输入离线码不需要密码。设置页默认密码是 `1234`。
+文件预览会显示 `grant.conf` 和 `settings.conf`，其中可能包含授权密钥或明文设置密码，请只在可信环境下查看。
 
 ## 安全提示
 
