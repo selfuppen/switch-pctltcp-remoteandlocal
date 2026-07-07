@@ -438,6 +438,8 @@ error
 
 ## 真实 Switch + Atmosphere 端到端测试
 
+详细的 `grant.conf` `control_mode` 说明和低风险到强控制的分阶段真机流程见 `REAL_SWITCH_TESTING.md`。本节保留端到端用例摘要。
+
 ### 安装
 
 构建后打包：

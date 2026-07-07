@@ -27,6 +27,7 @@ grant.conf.example      Switch 端离线码配置示例
 settings.conf.example   companion 设置密码示例
 GRANTS.md               离线码格式和使用说明
 TESTING.md              真机与模拟器测试方案
+REAL_SWITCH_TESTING.md  真机 control_mode 分阶段测试指南
 ```
 
 ## 构建
@@ -95,7 +96,7 @@ sdmc:/switch/pctltcp-sysmodule/grant.conf
 - `grant_secret`：离线码签名密钥，应使用足够长的随机字符串。
 - `max_add_minutes`：单个离线码允许增加的最大分钟数。
 - `control_mode`：默认 `observe`，只验证和读取，不写 PCTL；稳定后可切换到 `grant` 或 `enforce`。
-- `allow_unlimited_to_limited`：默认 `false`，避免把无限制/未配置的当天改成有限制。
+- `allow_unlimited_to_limited`：默认 `false`，避免把无限制/未配置的当天改成有限制；如果设为 `true`，无限制当天会按 0 分钟起算再叠加授权分钟数。
 
 companion 设置密码保存在：
 
@@ -146,4 +147,5 @@ python tools/grant_code.py \
 
 - 不要提交真实 `grant_secret`。
 - 离线码只对同一天、同一 `device_id` 和同一 `grant_secret` 有效。
+- 如需临时停用 sysmodule，可在 SD 卡创建 `sdmc:/switch/pctltcp-sysmodule/disable.flag` 进入 fail-open 状态，即停止处理授权并避免触碰 PCTL。
 - 密码只用于保护 companion 设置页，不是高强度安全边界；它以明文保存在 SD 卡上。
