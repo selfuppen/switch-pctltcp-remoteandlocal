@@ -10,7 +10,8 @@
 - `pctltcp-sysmodule.json` 和 `toolbox.json`：Switch 打包与 boot2 启动元数据。
 - `grant.conf.example`：Switch 端离线授权配置示例。
 - `settings.conf.example`：companion 设置密码示例。
-- `README.md` 与 `GRANTS.md`：面向用户的安装、打包和离线授权说明。
+- `README.md`：仓库入口说明。
+- `docs/`：面向用户、测试、架构和产品设计的说明性文档，例如 `docs/GRANTS.md`、`docs/TESTING.md` 和 `docs/REAL_SWITCH_TESTING.md`。
 
 目前没有专门的 `tests/` 或资产目录。
 

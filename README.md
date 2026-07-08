@@ -1,6 +1,6 @@
 # switch-pctltcp-offline-grant
 
-真机测试请先阅读 `SAFE_TESTING.md`。默认配置使用 `control_mode=observe`，打包脚本默认不放 `boot2.flag`，用于避免一上机就进入强控制。
+真机测试请先阅读 `docs/SAFE_TESTING.md`。默认配置使用 `control_mode=observe`，打包脚本默认不放 `boot2.flag`，用于避免一上机就进入强控制。
 
 Nintendo Switch 家长控制离线加时工具。项目由三部分组成：
 
@@ -25,9 +25,14 @@ tools/grant_code.py     家长侧离线码生成工具
 tools/package_sdmc.sh   SD 卡安装包打包脚本
 grant.conf.example      Switch 端离线码配置示例
 settings.conf.example   companion 设置密码示例
-GRANTS.md               离线码格式和使用说明
-TESTING.md              真机与模拟器测试方案
-REAL_SWITCH_TESTING.md  真机 control_mode 分阶段测试指南
+docs/                  说明性文档目录
+  GRANTS.md            离线码格式和使用说明
+  SAFE_TESTING.md      低风险真机测试提示
+  TESTING.md           真机与模拟器测试方案
+  REAL_SWITCH_TESTING.md  真机 control_mode 分阶段测试指南
+  PLAY_TIME_CONTROL_22_5.md  本地时间管理说明
+  PRODUCT_SPEC_REBUILD.md    产品重建设计说明
+  TECH_ARCHITECTURE_*.md     架构设计说明
 ```
 
 ## 构建
