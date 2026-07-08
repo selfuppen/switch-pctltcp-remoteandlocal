@@ -12,6 +12,8 @@
 - 修改密码后是否写入 `settings.conf`。
 - 输入离线码后是否写出 `grant_request.json`。
 - 手动创建 `grant_result.json` 后，NRO 是否能读取并显示结果。
+- 长按 `L + R + X` 是否能进入密码保护的家长区。
+- 家长区操作是否能写出对应 `grant_request.json`。
 
 需要真实 Switch 测试：
 
@@ -47,6 +49,7 @@ sdmc:/switch/pctltcp-sysmodule/
 ```text
 grant.conf
 settings.conf
+time_rules.json
 ```
 
 示例 `grant.conf`：
@@ -64,6 +67,8 @@ settings.conf
 ```text
 1234
 ```
+
+示例 `time_rules.json` 可使用仓库根目录的 `time_rules.json.example`。
 
 固定测试码生成命令：
 
@@ -133,24 +138,25 @@ companion\pctltcp-grant.nro
 
 1. 打开 `pctltcp-grant.nro`。
 2. 确认屏幕显示 `Pctl Offline Grant`。
-3. 确认菜单包含 `A Enter offline code`、`X Settings`、`Y Reload last result`、`PLUS Exit`。
+3. 确认菜单包含输入离线码、最近结果、刷新时间和退出提示。
 
 预期：
 
 - NRO 不崩溃。
 - 菜单内容和按键提示正确。
 
-### 用例 2：默认密码进入设置
+### 用例 2：默认密码进入家长区并修改密码
 
 步骤：
 
 1. 确认 `settings.conf` 内容为 `1234`，或删除 `settings.conf` 让前端走默认密码。
 2. 启动 NRO。
-3. 按 `X`。
+3. 长按 `L + R + X` 约 2 秒。
 4. 输入 `1234`。
-5. 输入新密码，例如 `5678`。
-6. 退出 NRO。
-7. 检查：
+5. 在家长区按 `Down` 进入修改密码。
+6. 输入新密码，例如 `5678`。
+7. 退出 NRO。
+8. 检查：
 
 ```text
 %APPDATA%\Ryujinx\sdcard\switch\pctltcp-sysmodule\settings.conf
@@ -196,7 +202,27 @@ companion\pctltcp-grant.nro
 - 如果文件存在且内容正确，说明前端输入到 SD 卡请求文件的链路正常。
 - 超时是预期行为，因为模拟器没有运行后台 sysmodule。
 
-### 用例 4：手动模拟 sysmodule 结果
+### 用例 4：家长区请求文件
+
+步骤：
+
+1. 启动 NRO。
+2. 长按 `L + R + X` 约 2 秒并输入设置密码。
+3. 在家长区按 `X`，输入 `90` 作为今日固定额度。
+4. 因为模拟器没有后台 sysmodule，等待结果可能超时。
+5. 检查：
+
+```text
+%APPDATA%\Ryujinx\sdcard\switch\pctltcp-sysmodule\grant_request.json
+```
+
+预期内容类似：
+
+```json
+{"type":"set_today_limit","minutes":90}
+```
+
+### 用例 5：手动模拟 sysmodule 结果
 
 步骤：
 
@@ -213,7 +239,7 @@ companion\pctltcp-grant.nro
 ```
 
 3. 启动或回到 NRO。
-4. 按 `Y` 刷新。
+4. 按 `B` 读取最近结果，或按 `Y` 刷新时间状态。
 
 预期：
 
@@ -319,7 +345,7 @@ companion\pctltcp-grant.nro
 - NRO 正常进入主界面。
 - 没有启动崩溃或明显输入异常。
 
-### 用例 2：设置密码读写
+### 用例 2：家长区和设置密码读写
 
 步骤：
 
@@ -336,11 +362,12 @@ companion\pctltcp-grant.nro
 ```
 
 2. 启动 NRO。
-3. 按 `X`。
+3. 长按 `L + R + X` 约 2 秒。
 4. 输入 `1234`。
-5. 输入新密码，例如 `5678`。
-6. 退出 NRO。
-7. 重新打开 `settings.conf`。
+5. 在家长区按 `Down`。
+6. 输入新密码，例如 `5678`。
+7. 退出 NRO。
+8. 重新打开 `settings.conf`。
 
 预期：
 
@@ -377,7 +404,27 @@ companion\pctltcp-grant.nro
 - 文件出现且内容正确即通过。
 - 等待结果超时是预期行为。
 
-### 用例 4：手动模拟 sysmodule 结果
+### 用例 4：家长区请求文件
+
+步骤：
+
+1. 启动 NRO。
+2. 长按 `L + R + X` 约 2 秒并输入设置密码。
+3. 在家长区按 `A` 测试今日 +15 分钟。
+4. 等待超时或退出。
+5. 检查：
+
+```text
+%APPDATA%\Eden\sdmc\switch\pctltcp-sysmodule\grant_request.json
+```
+
+预期内容类似：
+
+```json
+{"type":"add_today_minutes","minutes":15}
+```
+
+### 用例 5：手动模拟 sysmodule 结果
 
 步骤：
 
@@ -394,7 +441,7 @@ companion\pctltcp-grant.nro
 ```
 
 3. 启动或回到 NRO。
-4. 按 `Y` 刷新。
+4. 按 `B` 读取最近结果，或按 `Y` 刷新时间状态。
 
 预期：
 
@@ -458,6 +505,7 @@ sdmc:/atmosphere/contents/010000000000BD23/flags/boot2.flag
 sdmc:/switch/pctltcp-grant.nro
 sdmc:/switch/pctltcp-sysmodule/grant.conf
 sdmc:/switch/pctltcp-sysmodule/settings.conf
+sdmc:/switch/pctltcp-sysmodule/time_rules.json
 ```
 
 重启进入 CFW。
@@ -563,6 +611,7 @@ grant: applied successfully
 - 设置密码能读写 `settings.conf`。
 - 输入离线码能写出 `grant_request.json`。
 - 手动创建 `grant_result.json` 后，按 `Y` 能显示结果。
+- 家长区能写出今日管理、周模板、bedtime 或 parent unlock 请求。
 
 真机通过条件：
 
@@ -570,3 +619,4 @@ grant: applied successfully
 - 有效码真实加时。
 - 无效码按原因拒绝。
 - `used_grants.dat` 能阻止同一日期和 nonce 重复使用。
+- 家长区本地规则、事件日志、月度报告和 raw `0` 验证流程符合 `REAL_SWITCH_TESTING.md`。

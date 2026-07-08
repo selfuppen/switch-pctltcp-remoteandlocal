@@ -11,6 +11,10 @@
 #define GRANT_USED_PATH    GRANT_DIR "/used_grants.dat"
 #define GRANT_DISABLE_PATH GRANT_DIR "/disable.flag"
 #define GRANT_BACKUP_PATH  GRANT_DIR "/last_pctl_backup.dat"
+#define TIME_RULES_PATH    GRANT_DIR "/time_rules.json"
+#define TIME_STATE_PATH    GRANT_DIR "/time_state.json"
+#define EVENTS_PATH        GRANT_DIR "/events.jsonl"
+#define MONTHLY_REPORT_PATH GRANT_DIR "/monthly_report.txt"
 
 typedef enum {
     GRANT_CONTROL_DISABLED = 0,

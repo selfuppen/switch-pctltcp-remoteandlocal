@@ -127,6 +127,8 @@ GRANT_CONF="$ROOT_DIR/grant.conf"
 GRANT_CONF_EXAMPLE="$ROOT_DIR/grant.conf.example"
 SETTINGS_CONF="$ROOT_DIR/settings.conf"
 SETTINGS_CONF_EXAMPLE="$ROOT_DIR/settings.conf.example"
+TIME_RULES="$ROOT_DIR/time_rules.json"
+TIME_RULES_EXAMPLE="$ROOT_DIR/time_rules.json.example"
 
 need_file() {
     if [ ! -f "$1" ]; then
@@ -141,6 +143,7 @@ need_file "$GRANT_NRO" || missing=1
 need_file "$TOOLBOX" || missing=1
 need_file "$GRANT_CONF_EXAMPLE" || missing=1
 need_file "$SETTINGS_CONF_EXAMPLE" || missing=1
+need_file "$TIME_RULES_EXAMPLE" || missing=1
 
 if [ "$missing" -ne 0 ]; then
     echo
@@ -224,6 +227,12 @@ if [ -f "$SETTINGS_CONF" ]; then
     cp "$SETTINGS_CONF" "$PACK_DIR/switch/pctltcp-sysmodule/settings.conf"
 else
     cp "$SETTINGS_CONF_EXAMPLE" "$PACK_DIR/switch/pctltcp-sysmodule/settings.conf"
+fi
+
+if [ -f "$TIME_RULES" ]; then
+    cp "$TIME_RULES" "$PACK_DIR/switch/pctltcp-sysmodule/time_rules.json"
+else
+    cp "$TIME_RULES_EXAMPLE" "$PACK_DIR/switch/pctltcp-sysmodule/time_rules.json"
 fi
 
 (

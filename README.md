@@ -137,13 +137,30 @@ python tools/grant_code.py \
 打开 `pctltcp-grant.nro`：
 
 - `A`：输入离线授权码。
-- `B`：输入设置密码后查看 `grant_result.json`、`grant_request.json`、`sysmodule.log`、`grant.conf`、`settings.conf` 等文件。
-- `X`：进入设置，输入当前密码后修改密码。
-- `Y`：刷新上一次 sysmodule 执行结果。
+- `B`：重新读取最近一次 sysmodule 执行结果。
+- `Y`：刷新当前时间状态。
+- 长按 `L + R + X`：输入设置密码后进入家长区。
 - `Plus`：退出。
 
 输入离线码不需要密码。设置页默认密码是 `1234`。
 文件预览会显示 `grant.conf` 和 `settings.conf`，其中可能包含授权密钥或明文设置密码，请只在可信环境下查看。
+
+## 本地时间管理
+
+新版本会在 `sdmc:/switch/pctltcp-sysmodule/` 下维护：
+
+```text
+time_rules.json
+time_state.json
+events.jsonl
+monthly_report.txt
+```
+
+`time_rules.json` 保存一周模板、今日临时规则、bedtime、提醒/强制模式，以及 raw `0` 禁玩和 `Suspend Software` 的真机验证开关。默认可参考仓库中的 `time_rules.json.example`。
+
+孩子主屏只显示今日额度、剩余时间、当前状态和离线加时码入口。家长区通过主屏长按 `L + R + X` 约 2 秒呼出，并需要输入本地设置密码。家长区支持今日固定额度、今日加时、今日不限、今日禁玩、恢复周模板、平日/周末模板、bedtime、临时 parent unlock、文件/事件记录查看和修改本地密码。
+
+`raw 0` 禁玩默认未启用。需要先在家长区触发 raw block probe，在真机确认行为后再标记 `raw_block_verified=true`，之后才允许使用“今日禁止游玩”。
 
 ## 安全提示
 

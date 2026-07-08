@@ -61,9 +61,9 @@ companion/pctltcp-grant.nro
 菜单：
 
 - `A`：输入离线授权码。
-- `B`：输入设置密码后查看 `grant_result.json`、`grant_request.json`、`sysmodule.log`、`grant.conf`、`settings.conf` 等文件。
-- `X`：进入设置，输入当前密码后修改密码。
-- `Y`：重新读取上一次 sysmodule 执行结果。
+- `B`：重新读取最近一次 sysmodule 执行结果。
+- `Y`：刷新当前时间状态。
+- 长按 `L + R + X` 约 2 秒：输入设置密码后进入家长区。
 - `Plus`：退出。
 
 输入离线码不需要密码。设置页密码保存在：
@@ -75,7 +75,27 @@ sdmc:/switch/pctltcp-sysmodule/settings.conf
 缺失或为空时默认密码为 `1234`。
 
 NRO 会写入 `grant_request.json`，sysmodule 会写入 `grant_result.json`。
-文件预览会显示配置内容，其中 `grant.conf` 可能包含 `grant_secret`，`settings.conf` 可能包含明文设置密码。
+家长区可以查看配置、日志、事件和月度报告，其中 `grant.conf` 可能包含 `grant_secret`，`settings.conf` 可能包含明文设置密码。
+
+## 本地时间管理
+
+除离线码外，家长区还支持本地时间管理：
+
+- 设置今天固定限制分钟数，或今天临时增加 15/30/60 分钟。
+- 今天关闭限制、恢复一周模板，或在验证后启用“今日禁止游玩”。
+- 设置平日/周末模板、bedtime、提醒/强制动作和 parent unlock。
+- 查看 `events.jsonl`、`monthly_report.txt`、`time_rules.json` 和 `time_state.json`。
+
+本地规则文件路径：
+
+```text
+sdmc:/switch/pctltcp-sysmodule/time_rules.json
+sdmc:/switch/pctltcp-sysmodule/time_state.json
+sdmc:/switch/pctltcp-sysmodule/events.jsonl
+sdmc:/switch/pctltcp-sysmodule/monthly_report.txt
+```
+
+`raw 0` 今日禁玩默认未验证。家长区会先触发 raw block probe；只有真机确认行为后，才应标记 `raw_block_verified=true` 并使用“今日禁止游玩”。
 
 ## 打包到 SD 卡
 
@@ -95,9 +115,10 @@ atmosphere/contents/010000000000BD23/flags/boot2.flag
 switch/pctltcp-grant.nro
 switch/pctltcp-sysmodule/grant.conf
 switch/pctltcp-sysmodule/settings.conf
+switch/pctltcp-sysmodule/time_rules.json
 ```
 
-如果仓库根目录存在真实 `grant.conf` 或 `settings.conf`，脚本会优先打包真实配置；否则使用示例文件。
+如果仓库根目录存在真实 `grant.conf`、`settings.conf` 或 `time_rules.json`，脚本会优先打包真实配置；否则使用示例文件。
 
 ## Token 格式
 

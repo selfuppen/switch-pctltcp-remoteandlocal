@@ -266,7 +266,7 @@ Result pctl_get_day_limit_minutes(int day, u32 *minutes)
     return 0;
 }
 
-Result pctl_set_day_limit_minutes(int day, u32 minutes)
+static Result pctl_set_day_raw_minutes(int day, u16 minutes, bool restricted)
 {
     if (day < 0 || day >= PCTL_DAYS)
         return MAKERESULT(Module_Libnx, LibnxError_BadInput);
@@ -275,24 +275,42 @@ Result pctl_set_day_limit_minutes(int day, u32 minutes)
     Result rc = pctl_get_settings(&settings);
     if (R_FAILED(rc)) return rc;
 
-    u16 val;
-    if (minutes == 0) {
-        val = PT_DAY_NOLIMIT;
-    } else {
-        if (minutes > 1440) minutes = 1440;
-        val = (u16)minutes;
-    }
-
-    if (settings.raw[0] == 0) {
+    if (restricted) {
         settings.raw[0] = 0x0101;
         settings.raw[1] = 0x0001;
+        settings.raw[PCTL_DAY_FLAG_OFFSET(day)] = PCTL_DAY_CONFIGURED;
+        settings.raw[PCTL_DAY_ENABLE_OFFSET(day)] = PCTL_DAY_RESTRICTED;
+    } else {
+        settings.raw[PCTL_DAY_FLAG_OFFSET(day)] = 0x0000;
+        settings.raw[PCTL_DAY_ENABLE_OFFSET(day)] = 0x0000;
     }
 
-    settings.raw[PCTL_DAY_FLAG_OFFSET(day)]    = (val != PT_DAY_NOLIMIT) ? PCTL_DAY_CONFIGURED : 0x0000;
-    settings.raw[PCTL_DAY_ENABLE_OFFSET(day)]  = (val != PT_DAY_NOLIMIT) ? PCTL_DAY_RESTRICTED : 0x0000;
-    settings.raw[PCTL_DAY_MINUTES_OFFSET(day)] = val;
+    settings.raw[PCTL_DAY_MINUTES_OFFSET(day)] = minutes;
 
     return pctl_set_settings(&settings);
+}
+
+Result pctl_set_day_restricted(int day, u32 minutes)
+{
+    if (minutes == 0 || minutes > 1440)
+        return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+
+    return pctl_set_day_raw_minutes(day, (u16)minutes, true);
+}
+
+Result pctl_set_day_unlimited(int day)
+{
+    return pctl_set_day_raw_minutes(day, PT_DAY_NOLIMIT, false);
+}
+
+Result pctl_set_day_blocked(int day)
+{
+    return pctl_set_day_raw_minutes(day, 0, true);
+}
+
+Result pctl_set_day_limit_minutes(int day, u32 minutes)
+{
+    return pctl_set_day_restricted(day, minutes);
 }
 
 Result pctl_set_daily_limit_minutes(u32 minutes)
@@ -301,21 +319,16 @@ Result pctl_set_daily_limit_minutes(u32 minutes)
     Result rc = pctl_get_settings(&settings);
     if (R_FAILED(rc)) return rc;
 
-    u16 val;
-    if (minutes == 0) {
-        val = PT_DAY_NOLIMIT;
-    } else {
-        if (minutes > 1440) minutes = 1440;
-        val = (u16)minutes;
-    }
+    if (minutes == 0 || minutes > 1440)
+        return MAKERESULT(Module_Libnx, LibnxError_BadInput);
 
-    settings.raw[0] = (val != PT_DAY_NOLIMIT) ? 0x0101 : 0x0000;
-    settings.raw[1] = (val != PT_DAY_NOLIMIT) ? 0x0001 : 0x0000;
+    settings.raw[0] = 0x0101;
+    settings.raw[1] = 0x0001;
 
     for (int d = 0; d < PCTL_DAYS; d++) {
-        settings.raw[PCTL_DAY_FLAG_OFFSET(d)]    = (val != PT_DAY_NOLIMIT) ? PCTL_DAY_CONFIGURED : 0x0000;
-        settings.raw[PCTL_DAY_ENABLE_OFFSET(d)]  = (val != PT_DAY_NOLIMIT) ? PCTL_DAY_RESTRICTED : 0x0000;
-        settings.raw[PCTL_DAY_MINUTES_OFFSET(d)] = val;
+        settings.raw[PCTL_DAY_FLAG_OFFSET(d)] = PCTL_DAY_CONFIGURED;
+        settings.raw[PCTL_DAY_ENABLE_OFFSET(d)] = PCTL_DAY_RESTRICTED;
+        settings.raw[PCTL_DAY_MINUTES_OFFSET(d)] = (u16)minutes;
     }
 
     return pctl_set_settings(&settings);

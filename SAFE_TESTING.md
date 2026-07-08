@@ -34,6 +34,40 @@ sdmc:/atmosphere/contents/010000000000BD23/flags/boot2.flag
 5. 确认 `last_pctl_backup.dat` 已写入，再扩大测试有效码、重复码、错日期码、错密钥码和超上限码。
 6. 只有稳定后才使用 `./tools/package_sdmc.sh --strong-control` 或手动设置 `control_mode=enforce`。
 
+## 家长区和本地规则测试
+
+companion 主屏不会直接显示家长设置入口。需要长按 `L + R + X` 约 2 秒，再输入 `settings.conf` 中的本地设置密码进入家长区。默认密码仍为 `1234`。
+
+家长区会写入或读取以下文件：
+
+```text
+sdmc:/switch/pctltcp-sysmodule/time_rules.json
+sdmc:/switch/pctltcp-sysmodule/time_state.json
+sdmc:/switch/pctltcp-sysmodule/events.jsonl
+sdmc:/switch/pctltcp-sysmodule/monthly_report.txt
+```
+
+建议先在 `observe` 模式测试家长区操作：今日固定额度、+15/+30/+60、今日不限、恢复周模板、平日/周末模板、bedtime 和 parent unlock。`observe` 模式应返回 `dry_run:true`，并只更新本地规则/事件，不应改变系统家长控制。
+
+## raw 0 今日禁玩
+
+`raw 0` 禁玩是高风险真机验证项。默认 `time_rules.json` 中：
+
+```json
+{
+    "raw_block_verified": false
+}
+```
+
+在该状态下，普通“今日禁止游玩”请求会返回 `raw_block_not_verified`，不会写 PCTL。需要先在家长区触发 raw block probe，在真实 Switch 上确认：
+
+- `last_pctl_backup.dat` 已生成。
+- PCTL 原始当天分钟数写为 `0`。
+- 达到限制或启动游戏时的系统行为符合预期。
+- 可以通过恢复周模板或备份手动恢复。
+
+确认后，再在家长区按提示标记 `raw_block_verified=true`，之后才允许使用“今日禁止游玩”。
+
 ## 安全默认
 
 示例配置默认：

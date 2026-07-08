@@ -365,6 +365,87 @@ pctl_start_play_timer: OK
 - 有效码写入后返回 `dry_run:false` 和 `mode:"enforce"`。
 - 重复码仍被 `used_token` 拒绝。
 
+## 阶段 7：本地时间管理家长区
+
+目的：验证 companion 的隐藏家长区、本地规则文件、今日操作、周模板、bedtime 和 parent unlock。
+
+1. 建议先使用 `observe` 模式：
+
+```bash
+./tools/package_sdmc.sh --boot2 --control-mode observe --max-add-minutes 10 --no-allow-unlimited-to-limited
+```
+
+2. 打开 `pctltcp-grant.nro`，长按 `L + R + X` 约 2 秒。
+3. 输入 `settings.conf` 中的本地设置密码，默认是 `1234`。
+4. 依次测试家长区操作：
+
+| 操作 | 按键 | observe 预期 |
+| --- | --- | --- |
+| 今日 +15/+30/+60 | `A` / `Up` / `Left` | 返回 `dry_run:true`，系统限制不变 |
+| 今日固定额度 | `X` 后输入分钟 | 写入 `time_rules.json` 今日 override |
+| 今日不限 | `Y` | 写入今日 unlimited override |
+| 恢复周模板 | `L` | 清除今日 override 并按周模板计算 |
+| 平日/周末模板 | `ZL` | 更新 `time_rules.json` 七天模板 |
+| bedtime | `ZR` | 更新 bedtime 开始和恢复分钟 |
+| parent unlock | `Minus` | 写入 `time_state.json`，并尝试暂停/恢复 play timer |
+| 文件/事件/报告 | `B` | 可查看 `events.jsonl`、`monthly_report.txt` 等 |
+
+5. 检查文件：
+
+```text
+sdmc:/switch/pctltcp-sysmodule/time_rules.json
+sdmc:/switch/pctltcp-sysmodule/time_state.json
+sdmc:/switch/pctltcp-sysmodule/events.jsonl
+sdmc:/switch/pctltcp-sysmodule/monthly_report.txt
+```
+
+通过标准：
+
+- 孩子主屏不直接暴露家长设置入口。
+- 家长区密码保护生效。
+- `observe` 模式下家长区操作不修改系统 PCTL 设置。
+- `events.jsonl` 记录每次授权、家长操作、拒绝和错误。
+- `monthly_report.txt` 明确说明它是本地事件估算，不是官方 per-game 月报。
+
+## 阶段 8：raw 0 今日禁玩验证
+
+目的：验证 raw `0` blocked 行为，并确认只有验证后才允许普通“今日禁止游玩”。
+
+1. 确认 `time_rules.json` 中：
+
+```json
+{
+  "raw_block_verified": false
+}
+```
+
+2. 在家长区按 `R` 尝试“今日禁止游玩”。
+3. 预期返回：
+
+```json
+{"status":"error","reason":"raw_block_not_verified"}
+```
+
+4. 切到 `grant` 或 `enforce` 后，在家长区按 `Right` 触发 raw block probe。
+5. 检查：
+
+```text
+sdmc:/switch/pctltcp-sysmodule/last_pctl_backup.dat
+sdmc:/switch/pctltcp-sysmodule/events.jsonl
+sdmc:/switch/pctltcp-sysmodule/grant_result.json
+```
+
+6. 在真实游戏/软件中确认系统行为：是否立即受限、是否显示提醒、是否能恢复。
+7. 确认无误后，再按 `Right` 标记 `raw_block_verified=true`。
+8. 再按 `R` 测试普通“今日禁止游玩”。
+
+通过标准：
+
+- 未验证前普通 block 请求被拒绝，不写 PCTL。
+- probe 会先写 `last_pctl_backup.dat`。
+- 验证后普通 block 请求才允许写 raw `0`。
+- 可通过恢复周模板或备份路径恢复当天设置。
+
 ## 建议记录表
 
 | 阶段 | control_mode | 输入码 | 预期结果 | 实际结果 | PCTL 是否变化 | 备注 |
@@ -378,6 +459,9 @@ pctl_start_play_timer: OK
 | grant | grant | 错密钥码 | `bad_signature` |  | 否 |  |
 | grant | grant | 超上限码 | `minutes_exceed_limit` |  | 否 |  |
 | enforce | enforce | 有效码 | `dry_run:false` |  | 是 | play timer 强控制 |
+| observe | observe | 家长区今日操作 | `dry_run:true` |  | 否 | 本地规则更新 |
+| grant/enforce | grant/enforce | raw block 未验证 | `raw_block_not_verified` |  | 否 | 保护路径 |
+| grant/enforce | grant/enforce | raw block probe | `dry_run:false` |  | 是 | 必须人工确认 |
 
 ## 完成标准
 
@@ -388,3 +472,5 @@ pctl_start_play_timer: OK
 - `grant` 模式能对有效码真实加时，写入 `last_pctl_backup.dat`，并拒绝重复码。
 - 错日期、错密钥、超上限和无限状态保护用例均返回对应 reason，且不修改 PCTL。
 - `enforce` 模式在 `grant` 稳定后能正常启动，日志显示 play timer 启用路径，并能完成一次真实加时。
+- 家长区隐藏入口、密码保护、本地规则文件、事件日志和月度报告可正常工作。
+- raw `0` 禁玩在未验证前被拒绝，probe 验证后才允许作为普通今日禁玩使用。

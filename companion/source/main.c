@@ -18,11 +18,15 @@
 #define SYSMODULE_LOG_PATH GRANT_DIR "/sysmodule.log"
 #define SYSMODULE_OLD_LOG_PATH GRANT_DIR "/sysmodule.log.old"
 #define GRANT_CONFIG_PATH  GRANT_DIR "/grant.conf"
+#define TIME_RULES_PATH    GRANT_DIR "/time_rules.json"
+#define TIME_STATE_PATH    GRANT_DIR "/time_state.json"
+#define EVENTS_PATH        GRANT_DIR "/events.jsonl"
+#define MONTHLY_REPORT_PATH GRANT_DIR "/monthly_report.txt"
 #define DEFAULT_PASSWORD   "1234"
 
 #define SCREEN_W 1280
 #define SCREEN_H 720
-#define X_HOLD_FRAMES 48
+#define PARENT_HOLD_FRAMES 120
 #define PREVIEW_MAX_BYTES 8192
 #define PREVIEW_LINE_COUNT 15
 #define PREVIEW_LINE_MAX 104
@@ -48,8 +52,9 @@ typedef struct {
     char message[512];
     bool button_pressed;
     bool preview_button_pressed;
-    int x_hold_frames;
-    bool settings_triggered;
+    int parent_hold_frames;
+    bool parent_triggered;
+    bool raw_probe_pending;
     bool touch_was_down;
 } UiState;
 
@@ -57,9 +62,21 @@ typedef struct {
     bool loaded;
     bool read_failed;
     bool limited_today;
+    bool blocked_today;
+    bool unrestricted_today;
     int today_limit;
     bool remaining_available;
     int remaining_minutes;
+    bool play_timer_enabled;
+    bool restricted_now;
+    bool bedtime_active;
+    bool parent_unlock_active;
+    bool raw_block_verified;
+    bool suspend_verified;
+    char mode[32];
+    char active_rule[32];
+    int active_rule_minutes;
+    char limit_action[32];
     char message[128];
 } TimeStatus;
 
@@ -107,6 +124,10 @@ static const PreviewFile PREVIEW_FILES[] = {
     {"sysmodule.log.old", SYSMODULE_OLD_LOG_PATH},
     {"grant.conf", GRANT_CONFIG_PATH},
     {"settings.conf", SETTINGS_PATH},
+    {"time_rules.json", TIME_RULES_PATH},
+    {"time_state.json", TIME_STATE_PATH},
+    {"events.jsonl", EVENTS_PATH},
+    {"monthly_report.txt", MONTHLY_REPORT_PATH},
 };
 static const int PREVIEW_FILE_COUNT = (int)(sizeof(PREVIEW_FILES) / sizeof(PREVIEW_FILES[0]));
 
@@ -290,12 +311,30 @@ static bool update_time_status_from_json(const char *text) {
     if (!text) return false;
 
     bool limited_today = false;
+    bool blocked_today = false;
+    bool unrestricted_today = false;
     bool remaining_available = false;
+    bool play_timer_enabled = false;
+    bool restricted_now = false;
+    bool bedtime_active = false;
+    bool parent_unlock_active = false;
+    bool raw_block_verified = false;
+    bool suspend_verified = false;
     int today_limit = 0;
     int remaining_minutes = 0;
+    int active_rule_minutes = 0;
+    char mode[32] = {0};
+    char active_rule[32] = {0};
+    char limit_action[32] = {0};
 
     const char *val = json_find_value(text, "limited_today");
     if (!val || !json_read_bool(val, &limited_today)) return false;
+
+    val = json_find_value(text, "blocked_today");
+    if (val) json_read_bool(val, &blocked_today);
+
+    val = json_find_value(text, "unrestricted_today");
+    if (val) json_read_bool(val, &unrestricted_today);
 
     val = json_find_value(text, "today_limit");
     if (!val || !json_read_int(val, &today_limit)) return false;
@@ -306,12 +345,54 @@ static bool update_time_status_from_json(const char *text) {
     val = json_find_value(text, "remaining_minutes");
     if (val) json_read_int(val, &remaining_minutes);
 
+    val = json_find_value(text, "play_timer_enabled");
+    if (val) json_read_bool(val, &play_timer_enabled);
+
+    val = json_find_value(text, "restricted_now");
+    if (val) json_read_bool(val, &restricted_now);
+
+    val = json_find_value(text, "bedtime_active");
+    if (val) json_read_bool(val, &bedtime_active);
+
+    val = json_find_value(text, "parent_unlock_active");
+    if (val) json_read_bool(val, &parent_unlock_active);
+
+    val = json_find_value(text, "raw_block_verified");
+    if (val) json_read_bool(val, &raw_block_verified);
+
+    val = json_find_value(text, "suspend_verified");
+    if (val) json_read_bool(val, &suspend_verified);
+
+    val = json_find_value(text, "active_rule_minutes");
+    if (val) json_read_int(val, &active_rule_minutes);
+
+    val = json_find_value(text, "mode");
+    if (val) json_read_string(val, mode, sizeof(mode));
+
+    val = json_find_value(text, "active_rule");
+    if (val) json_read_string(val, active_rule, sizeof(active_rule));
+
+    val = json_find_value(text, "limit_action");
+    if (val) json_read_string(val, limit_action, sizeof(limit_action));
+
     g_time.loaded = true;
     g_time.read_failed = false;
     g_time.limited_today = limited_today;
+    g_time.blocked_today = blocked_today;
+    g_time.unrestricted_today = unrestricted_today;
     g_time.today_limit = today_limit;
     g_time.remaining_available = remaining_available;
     g_time.remaining_minutes = remaining_minutes;
+    g_time.play_timer_enabled = play_timer_enabled;
+    g_time.restricted_now = restricted_now;
+    g_time.bedtime_active = bedtime_active;
+    g_time.parent_unlock_active = parent_unlock_active;
+    g_time.raw_block_verified = raw_block_verified;
+    g_time.suspend_verified = suspend_verified;
+    g_time.active_rule_minutes = active_rule_minutes;
+    snprintf(g_time.mode, sizeof(g_time.mode), "%s", mode[0] ? mode : "-");
+    snprintf(g_time.active_rule, sizeof(g_time.active_rule), "%s", active_rule[0] ? active_rule : "-");
+    snprintf(g_time.limit_action, sizeof(g_time.limit_action), "%s", limit_action[0] ? limit_action : "remind");
     snprintf(g_time.message, sizeof(g_time.message), "时间信息已刷新。");
     return true;
 }
@@ -320,9 +401,21 @@ static void set_time_status_error(const char *msg) {
     g_time.loaded = false;
     g_time.read_failed = true;
     g_time.limited_today = false;
+    g_time.blocked_today = false;
+    g_time.unrestricted_today = false;
     g_time.today_limit = 0;
     g_time.remaining_available = false;
     g_time.remaining_minutes = 0;
+    g_time.play_timer_enabled = false;
+    g_time.restricted_now = false;
+    g_time.bedtime_active = false;
+    g_time.parent_unlock_active = false;
+    g_time.raw_block_verified = false;
+    g_time.suspend_verified = false;
+    g_time.mode[0] = '\0';
+    g_time.active_rule[0] = '\0';
+    g_time.limit_action[0] = '\0';
+    g_time.active_rule_minutes = 0;
     snprintf(g_time.message, sizeof(g_time.message), "%s", msg ? msg : "无法读取时间信息。");
 }
 
@@ -347,6 +440,11 @@ static const char *reason_to_zh(const char *reason) {
     if (strcmp(reason, "missing_code") == 0) return "请求中没有授权码。";
     if (strcmp(reason, "unknown_request") == 0) return "未知请求类型。";
     if (strcmp(reason, "invalid_minutes") == 0) return "加时时长无效。";
+    if (strcmp(reason, "raw_block_not_verified") == 0) return "raw 0 禁玩尚未真机验证，已拒绝写入。";
+    if (strcmp(reason, "remaining_unavailable") == 0) return "无法读取剩余时间，不能安全降低今日额度。";
+    if (strcmp(reason, "write_rules_failed") == 0) return "写入本地时间规则失败，请检查 SD 卡。";
+    if (strcmp(reason, "bad_bedtime") == 0) return "bedtime 时间格式无效。";
+    if (strcmp(reason, "bad_limit_action") == 0) return "限制动作设置无效。";
     return "未知错误";
 }
 
@@ -634,10 +732,11 @@ static void draw_text_center(uint32_t *fb, uint32_t stride, Rect area, const cha
 }
 
 static void draw_key_hint(uint32_t *fb, uint32_t stride, int x, const char *key, const char *label) {
-    Rect key_rect = {x, 654, 42, 36};
+    int key_w = key && strlen(key) > 2 ? 82 : 42;
+    Rect key_rect = {x, 654, key_w, 36};
     fill_round_rect(fb, stride, key_rect, 8, RGBA(235, 240, 248, 255));
-    draw_text_center(fb, stride, key_rect, key, 22, RGBA(37, 49, 67, 255));
-    draw_text(fb, stride, x + 52, 680, label, 24, RGBA(73, 86, 105, 255));
+    draw_text_center(fb, stride, key_rect, key, key_w > 42 ? 18 : 22, RGBA(37, 49, 67, 255));
+    draw_text(fb, stride, x + key_w + 10, 680, label, 24, RGBA(73, 86, 105, 255));
 }
 
 static void draw_button(uint32_t *fb, uint32_t stride, Rect rect, const char *title, const char *subtitle,
@@ -662,6 +761,8 @@ static void format_limit_text(char *buf, size_t size) {
         snprintf(buf, size, "无法读取");
     } else if (!g_time.loaded) {
         snprintf(buf, size, "正在读取");
+    } else if (g_time.blocked_today) {
+        snprintf(buf, size, "今日禁玩");
     } else if (!g_time.limited_today) {
         snprintf(buf, size, "未设置限制");
     } else {
@@ -695,11 +796,27 @@ static void draw_time_tile(uint32_t *fb, uint32_t stride, Rect rect, const char 
 static void draw_time_status(uint32_t *fb, uint32_t stride) {
     char limit[64];
     char remaining[64];
+    char state[64];
+    char mode[64];
     format_limit_text(limit, sizeof(limit));
     format_remaining_text(remaining, sizeof(remaining));
+    if (g_time.read_failed || !g_time.loaded) {
+        snprintf(state, sizeof(state), "-");
+    } else if (g_time.parent_unlock_active) {
+        snprintf(state, sizeof(state), "Parent unlock");
+    } else if (g_time.bedtime_active) {
+        snprintf(state, sizeof(state), "Bedtime");
+    } else if (g_time.restricted_now || g_time.blocked_today) {
+        snprintf(state, sizeof(state), "Restricted");
+    } else {
+        snprintf(state, sizeof(state), "Allowed");
+    }
+    snprintf(mode, sizeof(mode), "%s/%s", g_time.mode[0] ? g_time.mode : "-", g_time.limit_action[0] ? g_time.limit_action : "remind");
 
-    draw_time_tile(fb, stride, (Rect){220, 146, 400, 62}, "今日额度", limit, RGBA(48, 113, 204, 255));
-    draw_time_tile(fb, stride, (Rect){660, 146, 400, 62}, "剩余时间", remaining, RGBA(43, 153, 95, 255));
+    draw_time_tile(fb, stride, (Rect){76, 146, 260, 62}, "今日额度", limit, RGBA(48, 113, 204, 255));
+    draw_time_tile(fb, stride, (Rect){362, 146, 260, 62}, "剩余时间", remaining, RGBA(43, 153, 95, 255));
+    draw_time_tile(fb, stride, (Rect){648, 146, 260, 62}, "当前状态", state, RGBA(207, 76, 76, 255));
+    draw_time_tile(fb, stride, (Rect){934, 146, 270, 62}, "模式", mode, RGBA(111, 126, 147, 255));
 }
 
 static void draw_status_card(uint32_t *fb, uint32_t stride) {
@@ -743,15 +860,15 @@ static void draw_ui(void) {
 
     draw_button(fb, stride, PRIMARY_BUTTON, "输入授权码", "触摸这里或按 A", g_state.button_pressed,
                 RGBA(48, 113, 204, 255), RGBA(37, 96, 174, 255));
-    draw_button(fb, stride, PREVIEW_BUTTON, "查看文件", "按 B，需要设置密码", g_state.preview_button_pressed,
+    draw_button(fb, stride, PREVIEW_BUTTON, "最近结果", "按 B 重新读取", g_state.preview_button_pressed,
                 RGBA(73, 86, 105, 255), RGBA(52, 64, 82, 255));
 
     draw_status_card(fb, stride);
 
     draw_key_hint(fb, stride, 80, "A", "输入授权码");
-    draw_key_hint(fb, stride, 302, "B", "查看文件");
+    draw_key_hint(fb, stride, 302, "B", "最近结果");
     draw_key_hint(fb, stride, 502, "Y", "刷新时间");
-    draw_key_hint(fb, stride, 654, "X", "长按设置");
+    draw_key_hint(fb, stride, 654, "L+R+X", "家长");
     draw_key_hint(fb, stride, 882, "+", "退出");
 
     framebufferEnd(&g_ui.fb);
@@ -819,6 +936,47 @@ static void draw_preview_ui(void) {
     draw_key_hint(fb, stride, 602, "Y", "重读");
     draw_key_hint(fb, stride, 744, "B", "返回");
     draw_key_hint(fb, stride, 886, "+", "退出");
+
+    framebufferEnd(&g_ui.fb);
+}
+
+static void draw_parent_ui(void) {
+    uint32_t stride_bytes = 0;
+    uint32_t *fb = (uint32_t *)framebufferBegin(&g_ui.fb, &stride_bytes);
+    if (!fb) return;
+    uint32_t stride = stride_bytes / sizeof(uint32_t);
+
+    fill_rect(fb, stride, (Rect){0, 0, SCREEN_W, SCREEN_H}, RGBA(238, 243, 249, 255));
+    fill_rect(fb, stride, (Rect){0, 0, SCREEN_W, 104}, RGBA(255, 255, 255, 255));
+    fill_rect(fb, stride, (Rect){0, 102, SCREEN_W, 2}, RGBA(222, 229, 239, 255));
+
+    draw_text(fb, stride, 76, 66, "Parent Time Manager", 34, RGBA(31, 42, 58, 255));
+    draw_text(fb, stride, 78, 118, "Local rules, today overrides, bedtime, reports, and offline grants.", 22,
+              RGBA(83, 96, 114, 255));
+
+    draw_time_status(fb, stride);
+
+    Rect panel = {76, 236, 1128, 350};
+    fill_round_rect(fb, stride, panel, 14, RGBA(255, 255, 255, 255));
+    draw_border(fb, stride, panel, RGBA(219, 226, 236, 255));
+
+    draw_text(fb, stride, panel.x + 26, panel.y + 44, "Today", 28, RGBA(48, 113, 204, 255));
+    draw_text(fb, stride, panel.x + 26, panel.y + 90,
+              "A +15   Up +30   Left +60   X fixed   Y unlimited   R block   L restore",
+              22, RGBA(37, 49, 67, 255));
+    draw_text(fb, stride, panel.x + 26, panel.y + 138, "Rules", 28, RGBA(43, 153, 95, 255));
+    draw_text(fb, stride, panel.x + 26, panel.y + 184,
+              "ZR bedtime   ZL weekly template   Right limit action/raw verify",
+              22, RGBA(37, 49, 67, 255));
+    draw_text(fb, stride, panel.x + 26, panel.y + 232, "Records and settings", 28, RGBA(111, 126, 147, 255));
+    draw_text(fb, stride, panel.x + 26, panel.y + 278,
+              "B files/events   Minus parent unlock   Plus exit parent area   Down password",
+              22, RGBA(37, 49, 67, 255));
+
+    Rect status = {76, 610, 1128, 54};
+    fill_round_rect(fb, stride, status, 10, RGBA(255, 255, 255, 255));
+    draw_border(fb, stride, status, RGBA(219, 226, 236, 255));
+    draw_text(fb, stride, status.x + 20, status.y + 36, g_state.message, 20, RGBA(37, 49, 67, 255));
 
     framebufferEnd(&g_ui.fb);
 }
@@ -1021,6 +1179,146 @@ static void request_time_status(bool show_message) {
     if (show_message) set_status(UI_STATUS_ERROR, "刷新时间超时，请稍后重试。");
 }
 
+static void wait_result_parent(void) {
+    char result[1024];
+    set_status(UI_STATUS_WAITING, "Waiting for sysmodule...");
+
+    for (int i = 0; i < 25; i++) {
+        if (read_text(GRANT_RESULT_PATH, result, sizeof(result))) {
+            set_last_result_from_sysmodule(result);
+            return;
+        }
+        draw_parent_ui();
+        svcSleepThread(500000000ULL);
+    }
+
+    set_status(UI_STATUS_ERROR, "Timed out waiting for sysmodule.");
+}
+
+static void write_parent_request_and_wait(const char *req) {
+    if (!write_request(req)) {
+        set_status(UI_STATUS_ERROR, "Failed to write request to SD card.");
+        return;
+    }
+    wait_result_parent();
+    request_time_status(false);
+}
+
+static bool read_number_keyboard(const char *header, const char *guide, int *out) {
+    char text[32] = {0};
+    if (!show_keyboard(header, guide, text, sizeof(text))) return false;
+    trim_line(text);
+    char *end = NULL;
+    long value = strtol(text, &end, 10);
+    if (end == text || value < 0 || value > 1440) return false;
+    *out = (int)value;
+    return true;
+}
+
+static void parent_set_fixed_limit(void) {
+    int minutes = 0;
+    if (!read_number_keyboard("Today fixed limit", "Minutes 1-1440", &minutes) || minutes <= 0) {
+        set_status(UI_STATUS_IDLE, "Canceled or invalid minutes.");
+        return;
+    }
+    char req[96];
+    snprintf(req, sizeof(req), "{\"type\":\"set_today_limit\",\"minutes\":%d}", minutes);
+    write_parent_request_and_wait(req);
+}
+
+static void parent_add_minutes(int minutes) {
+    char req[96];
+    snprintf(req, sizeof(req), "{\"type\":\"add_today_minutes\",\"minutes\":%d}", minutes);
+    write_parent_request_and_wait(req);
+}
+
+static void parent_set_bedtime(void) {
+    int start = 0;
+    int end = 0;
+    if (!read_number_keyboard("Bedtime start", "Minute of day, e.g. 1260 for 21:00", &start)) {
+        set_status(UI_STATUS_IDLE, "Canceled bedtime.");
+        return;
+    }
+    if (!read_number_keyboard("Morning allow", "Minute of day, e.g. 480 for 08:00", &end)) {
+        set_status(UI_STATUS_IDLE, "Canceled bedtime.");
+        return;
+    }
+    char req[128];
+    snprintf(req, sizeof(req), "{\"type\":\"set_bedtime\",\"enabled\":true,\"start_min\":%d,\"end_min\":%d}", start, end);
+    write_parent_request_and_wait(req);
+}
+
+static void parent_set_weekly_template(void) {
+    int weekday = 0;
+    int weekend = 0;
+    if (!read_number_keyboard("Weekday limit", "Mon-Fri minutes, 0 means unlimited", &weekday)) {
+        set_status(UI_STATUS_IDLE, "Canceled weekly template.");
+        return;
+    }
+    if (!read_number_keyboard("Weekend limit", "Sat-Sun minutes, 0 means unlimited", &weekend)) {
+        set_status(UI_STATUS_IDLE, "Canceled weekly template.");
+        return;
+    }
+
+    char req[640];
+    snprintf(req, sizeof(req),
+             "{\"type\":\"set_weekly_template\","
+             "\"day0_mode\":\"%s\",\"day0_minutes\":%d,"
+             "\"day1_mode\":\"%s\",\"day1_minutes\":%d,"
+             "\"day2_mode\":\"%s\",\"day2_minutes\":%d,"
+             "\"day3_mode\":\"%s\",\"day3_minutes\":%d,"
+             "\"day4_mode\":\"%s\",\"day4_minutes\":%d,"
+             "\"day5_mode\":\"%s\",\"day5_minutes\":%d,"
+             "\"day6_mode\":\"%s\",\"day6_minutes\":%d}",
+             weekend > 0 ? "limit" : "unlimited", weekend > 0 ? weekend : 120,
+             weekday > 0 ? "limit" : "unlimited", weekday > 0 ? weekday : 120,
+             weekday > 0 ? "limit" : "unlimited", weekday > 0 ? weekday : 120,
+             weekday > 0 ? "limit" : "unlimited", weekday > 0 ? weekday : 120,
+             weekday > 0 ? "limit" : "unlimited", weekday > 0 ? weekday : 120,
+             weekday > 0 ? "limit" : "unlimited", weekday > 0 ? weekday : 120,
+             weekend > 0 ? "limit" : "unlimited", weekend > 0 ? weekend : 120);
+    write_parent_request_and_wait(req);
+}
+
+static void parent_set_limit_action(void) {
+    if (!g_time.raw_block_verified && !g_state.raw_probe_pending) {
+        g_state.raw_probe_pending = true;
+        write_parent_request_and_wait("{\"type\":\"probe_raw_block\"}");
+        set_status(UI_STATUS_WAITING, "Raw 0 probe sent. Verify console behavior, then press Right again to mark verified.");
+        return;
+    }
+
+    if (!g_time.raw_block_verified && g_state.raw_probe_pending) {
+        char req[160];
+        snprintf(req, sizeof(req),
+                 "{\"type\":\"set_limit_action\",\"action\":\"%s\",\"raw_block_verified\":true,\"suspend_verified\":%s}",
+                 g_time.limit_action[0] ? g_time.limit_action : "remind",
+                 g_time.suspend_verified ? "true" : "false");
+        g_state.raw_probe_pending = false;
+        write_parent_request_and_wait(req);
+        return;
+    }
+
+    const char *next_action = strcmp(g_time.limit_action, "suspend") == 0 ? "remind" : "suspend";
+    char req[160];
+    snprintf(req, sizeof(req),
+             "{\"type\":\"set_limit_action\",\"action\":\"%s\",\"raw_block_verified\":true,\"suspend_verified\":%s}",
+             next_action,
+             g_time.suspend_verified ? "true" : "false");
+    write_parent_request_and_wait(req);
+}
+
+static void parent_unlock_start(void) {
+    int minutes = 0;
+    if (!read_number_keyboard("Parent unlock", "Minutes to pause play timer", &minutes) || minutes <= 0) {
+        set_status(UI_STATUS_IDLE, "Canceled parent unlock.");
+        return;
+    }
+    char req[96];
+    snprintf(req, sizeof(req), "{\"type\":\"parent_unlock_start\",\"minutes\":%d}", minutes);
+    write_parent_request_and_wait(req);
+}
+
 static void request_offline_code(void) {
     char code[64] = {0};
     if (!show_keyboard("输入离线授权码", "示例：ABCD-EFGH-JKQ2-M7P9", code, sizeof(code))) {
@@ -1095,8 +1393,8 @@ static bool check_settings_password(const char *cancel_msg) {
     return true;
 }
 
-static bool open_file_preview(void) {
-    if (!check_settings_password("已取消查看文件。")) {
+static bool open_file_preview(bool require_password) {
+    if (require_password && !check_settings_password("已取消查看文件。")) {
         return true;
     }
 
@@ -1146,6 +1444,75 @@ static bool open_file_preview(void) {
     return false;
 }
 
+static bool open_parent_area(void) {
+    if (!check_settings_password("Parent area canceled.")) {
+        return true;
+    }
+
+    request_time_status(false);
+
+    PadState pad;
+    padInitializeDefault(&pad);
+
+    while (appletMainLoop()) {
+        padUpdate(&pad);
+        u64 down = padGetButtonsDown(&pad);
+
+        if (down & HidNpadButton_Plus) {
+            return true;
+        }
+        if (down & HidNpadButton_A) {
+            parent_add_minutes(15);
+        }
+        if (down & HidNpadButton_Up) {
+            parent_add_minutes(30);
+        }
+        if (down & HidNpadButton_Left) {
+            parent_add_minutes(60);
+        }
+        if (down & HidNpadButton_X) {
+            parent_set_fixed_limit();
+        }
+        if (down & HidNpadButton_Y) {
+            write_parent_request_and_wait("{\"type\":\"disable_today_limit\"}");
+        }
+        if (down & HidNpadButton_R) {
+            write_parent_request_and_wait("{\"type\":\"block_today\"}");
+        }
+        if (down & HidNpadButton_L) {
+            write_parent_request_and_wait("{\"type\":\"restore_today_policy\"}");
+        }
+        if (down & HidNpadButton_ZR) {
+            parent_set_bedtime();
+        }
+        if (down & HidNpadButton_ZL) {
+            parent_set_weekly_template();
+        }
+        if (down & HidNpadButton_Right) {
+            parent_set_limit_action();
+        }
+        if (down & HidNpadButton_Minus) {
+            if (g_time.parent_unlock_active) {
+                write_parent_request_and_wait("{\"type\":\"parent_unlock_end\"}");
+            } else {
+                parent_unlock_start();
+            }
+        }
+        if (down & HidNpadButton_Down) {
+            open_settings();
+        }
+        if (down & HidNpadButton_B) {
+            if (!open_file_preview(false)) {
+                return false;
+            }
+        }
+
+        draw_parent_ui();
+    }
+
+    return false;
+}
+
 int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
@@ -1188,20 +1555,24 @@ int main(int argc, char **argv) {
         }
 
         if ((down & HidNpadButton_B) || touch_preview) {
-            if (!open_file_preview()) {
-                break;
+            if (read_text(GRANT_RESULT_PATH, result, sizeof(result))) {
+                set_last_result_from_sysmodule(result);
+            } else {
+                set_status(UI_STATUS_IDLE, "没有找到最近结果。");
             }
         }
 
-        if (held & HidNpadButton_X) {
-            if (g_state.x_hold_frames < X_HOLD_FRAMES) g_state.x_hold_frames++;
-            if (g_state.x_hold_frames >= X_HOLD_FRAMES && !g_state.settings_triggered) {
-                g_state.settings_triggered = true;
-                open_settings();
+        if ((held & HidNpadButton_L) && (held & HidNpadButton_R) && (held & HidNpadButton_X)) {
+            if (g_state.parent_hold_frames < PARENT_HOLD_FRAMES) g_state.parent_hold_frames++;
+            if (g_state.parent_hold_frames >= PARENT_HOLD_FRAMES && !g_state.parent_triggered) {
+                g_state.parent_triggered = true;
+                if (!open_parent_area()) {
+                    break;
+                }
             }
         } else {
-            g_state.x_hold_frames = 0;
-            g_state.settings_triggered = false;
+            g_state.parent_hold_frames = 0;
+            g_state.parent_triggered = false;
         }
 
         if (down & HidNpadButton_Y) {
